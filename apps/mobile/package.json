@@ -10,7 +10,7 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/**/*.test.js"
+    "test": "jest --ci"
   },
   "dependencies": {
     "@banyone/contracts": "file:../../packages/contracts",
@@ -23,6 +23,7 @@
     "expo-font": "~55.0.4",
     "expo-glass-effect": "~55.0.8",
     "expo-image": "~55.0.6",
+    "expo-image-picker": "~55.0.13",
     "expo-linking": "~55.0.8",
     "expo-router": "~55.0.7",
     "expo-splash-screen": "~55.0.12",
@@ -34,17 +35,22 @@
     "react-dom": "19.2.0",
     "react-native": "0.83.2",
     "react-native-gesture-handler": "~2.30.0",
-    "react-native-worklets": "0.7.2",
     "react-native-reanimated": "4.2.1",
     "react-native-safe-area-context": "~5.6.2",
     "react-native-screens": "~4.23.0",
-    "react-native-web": "~0.21.0"
+    "react-native-web": "~0.21.0",
+    "react-native-worklets": "0.7.2"
   },
   "devDependencies": {
-    "@types/react": "~19.2.2",
+    "@testing-library/react-native": "^13.3.3",
+    "@types/jest": "^29.5.14",
+    "@types/react": "^19.2.2",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~55.0.0",
-    "typescript": "~5.9.2"
+    "jest": "^29.7.0",
+    "jest-expo": "^55.0.11",
+    "react-test-renderer": "^19.2.0",
+    "typescript": "^5.9.2"
   },
   "private": true
 }

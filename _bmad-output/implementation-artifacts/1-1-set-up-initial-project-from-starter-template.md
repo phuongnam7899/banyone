@@ -1,6 +1,6 @@
 # Story 1.1: Set Up Initial Project from Starter Template
 
-Status: review
+Status: done
 
 ## Story
 
@@ -10,51 +10,51 @@ so that subsequent stories can deliver user-facing value on a stable, consistent
 
 ## Acceptance Criteria
 
-1. **Given** a new repository workspace  
-   **When** the project is bootstrapped with Expo and NestJS starters  
+1. **Given** a new repository workspace
+  **When** the project is bootstrapped with Expo and NestJS starters  
    **Then** both apps run locally with documented setup commands.
 2. **And** shared TypeScript base config and lint/test scripts are available.
 3. **And** CI baseline checks for lint, typecheck, and unit test command execution are configured and passing for both apps.
 
 ## Tasks / Subtasks
 
-- [x] Bootstrap monorepo foundation and root tooling (AC: 1, 2, 3)
-  - [x] Create root workspace files: `package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `.editorconfig`, `.gitignore`, `.env.example`.
-  - [x] Add root scripts for workspace-level `lint`, `typecheck`, and `test` orchestration.
-  - [x] Ensure root package manager choice is consistent across docs and CI scripts.
-- [x] Initialize Expo app in `apps/mobile` with SDK 55 template (AC: 1)
-  - [x] Run `npx create-expo-app@latest --template default@sdk-55 apps/mobile`.
-  - [x] Verify app starts locally with documented command.
-  - [x] Keep starter routing/layout in place and avoid feature implementation beyond scaffold baseline.
-- [x] Initialize NestJS app in `apps/backend` (AC: 1)
-  - [x] Run `nest new apps/backend` from workspace root context.
-  - [x] Verify backend starts locally with documented command.
-  - [x] Preserve starter test setup and minimal module wiring.
-- [x] Set up shared TypeScript and lint/test conventions (AC: 2, 3)
-  - [x] Configure app-level `tsconfig.json` files to extend root `tsconfig.base.json`.
-  - [x] Add/align ESLint config package and script usage for mobile and backend.
-  - [x] Add baseline unit test command wiring for both apps (existing Nest tests + minimal mobile baseline command).
-- [x] Add baseline shared package scaffold (AC: 2, 3)
-  - [x] Create `packages/contracts` package with TypeScript config and `src/index.ts`.
-  - [x] Wire workspace dependencies so both apps can import shared contracts package later.
-- [x] Configure CI baseline workflows (AC: 3)
-  - [x] Add `.github/workflows/mobile-ci.yml`, `.github/workflows/backend-ci.yml`, `.github/workflows/contract-ci.yml`.
-  - [x] Ensure each workflow runs install + lint + typecheck + unit tests for its scope.
-  - [x] Keep workflows fast and deterministic (no deployment in this story).
-- [x] Document local setup and run commands (AC: 1, 3)
-  - [x] Update `README.md` with prerequisites and first-run steps for mobile/backend.
-  - [x] Include exact commands for lint/typecheck/test and app start commands.
+- Bootstrap monorepo foundation and root tooling (AC: 1, 2, 3)
+  - Create root workspace files: `package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `.editorconfig`, `.gitignore`, `.env.example`.
+  - Add root scripts for workspace-level `lint`, `typecheck`, and `test` orchestration.
+  - Ensure root package manager choice is consistent across docs and CI scripts.
+- Initialize Expo app in `apps/mobile` with SDK 55 template (AC: 1)
+  - Run `npx create-expo-app@latest --template default@sdk-55 apps/mobile`.
+  - Verify app starts locally with documented command.
+  - Keep starter routing/layout in place and avoid feature implementation beyond scaffold baseline.
+- Initialize NestJS app in `apps/backend` (AC: 1)
+  - Run `nest new apps/backend` from workspace root context.
+  - Verify backend starts locally with documented command.
+  - Preserve starter test setup and minimal module wiring.
+- Set up shared TypeScript and lint/test conventions (AC: 2, 3)
+  - Configure app-level `tsconfig.json` files to extend root `tsconfig.base.json`.
+  - Add/align ESLint config package and script usage for mobile and backend.
+  - Add baseline unit test command wiring for both apps (existing Nest tests + minimal mobile baseline command).
+- Add baseline shared package scaffold (AC: 2, 3)
+  - Create `packages/contracts` package with TypeScript config and `src/index.ts`.
+  - Wire workspace dependencies so both apps can import shared contracts package later.
+- Configure CI baseline workflows (AC: 3)
+  - Add `.github/workflows/mobile-ci.yml`, `.github/workflows/backend-ci.yml`, `.github/workflows/contract-ci.yml`.
+  - Ensure each workflow runs install + lint + typecheck + unit tests for its scope.
+  - Keep workflows fast and deterministic (no deployment in this story).
+- Document local setup and run commands (AC: 1, 3)
+  - Update `README.md` with prerequisites and first-run steps for mobile/backend.
+  - Include exact commands for lint/typecheck/test and app start commands.
 
 ### Review Follow-ups (AI)
 
-- [x] [AI-Review] Fix apps/mobile gitlink: convert to normal directory or proper submodule + CI
-- [x] [AI-Review] Align pnpm vs npm: remove pnpm-workspace.yaml or standardize on pnpm
-- [x] [AI-Review] CI workflows: add package-lock.json to paths filters so dep-only changes run gates
-- [x] [AI-Review] packages/contracts: add build/prepare for dist entrypoints or point main/types at src until build exists
-- [x] [AI-Review] packages/contracts: fix lint script / naming (avoid duplicate typecheck-only “lint”)
-- [x] [AI-Review] apps/backend main.ts: handle bootstrap failures (no unhandled rejections on listen/init)
-- [x] [AI-Review] apps/backend e2e: teardown app (e.g. afterEach app.close) to avoid leaks
-- [x] [AI-Review] After mobile git fix: align committed apps/mobile with root package-lock.json (no lockfile drift)
+- [AI-Review] Fix apps/mobile gitlink: convert to normal directory or proper submodule + CI
+- [AI-Review] Align pnpm vs npm: remove pnpm-workspace.yaml or standardize on pnpm
+- [AI-Review] CI workflows: add package-lock.json to paths filters so dep-only changes run gates
+- [AI-Review] packages/contracts: add build/prepare for dist entrypoints or point main/types at src until build exists
+- [AI-Review] packages/contracts: fix lint script / naming (avoid duplicate typecheck-only “lint”)
+- [AI-Review] apps/backend main.ts: handle bootstrap failures (no unhandled rejections on listen/init)
+- [AI-Review] apps/backend e2e: teardown app (e.g. afterEach app.close) to avoid leaks
+- [AI-Review] After mobile git fix: align committed apps/mobile with root package-lock.json (no lockfile drift)
 
 ### Deferred follow-ups (out of scope for this pass)
 
@@ -166,7 +166,7 @@ gpt-5.3-codex-low
 - `package.json`
 - `package-lock.json`
 - `tsconfig.base.json`
-- `apps/backend/*` (NestJS starter scaffold and config updates)
+- `apps/backend/`* (NestJS starter scaffold and config updates)
 - `apps/mobile/*` (Expo starter scaffold, lint setup, and baseline test wiring; no nested `package-lock.json`)
 - `packages/contracts/package.json`
 - `packages/contracts/eslint.config.mjs`
@@ -177,3 +177,4 @@ gpt-5.3-codex-low
 
 - 2026-03-24: Bootstrapped Expo + NestJS monorepo foundation, added contracts package and CI baseline workflows, and validated lint/typecheck/test command paths.
 - 2026-03-25: Addressed story 1.1 code-review follow-ups: normal `apps/mobile` tree, npm-only workspace (removed `pnpm-workspace.yaml`), CI triggers on lockfile changes, contracts build/lint split, safer Nest bootstrap and e2e teardown; refreshed root `package-lock.json`.
+

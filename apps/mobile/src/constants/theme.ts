@@ -14,6 +14,13 @@ export const Colors = {
     backgroundElement: '#F0F0F3',
     backgroundSelected: '#E0E1E6',
     textSecondary: '#60646C',
+    /** Primary CTA — ~7.8:1 vs white text (WCAG 2.2 AA normal text). */
+    primary: '#1565C0',
+    onPrimary: '#FFFFFF',
+    /** Info / constraint chips — paired with icon + label (not color-only). */
+    infoSurface: '#E3F2FD',
+    onInfoSurface: '#0D47A1',
+    warningIcon: '#B28704',
   },
   dark: {
     text: '#ffffff',
@@ -21,6 +28,12 @@ export const Colors = {
     backgroundElement: '#212225',
     backgroundSelected: '#2E3135',
     textSecondary: '#B0B4BA',
+    /** Primary CTA — sufficient contrast vs onPrimary in dark mode. */
+    primary: '#90CAF9',
+    onPrimary: '#0D1117',
+    infoSurface: '#1E3A5F',
+    onInfoSurface: '#E3F2FD',
+    warningIcon: '#FFD54F',
   },
 } as const;
 

@@ -1,6 +1,6 @@
 # Story 1.2: Upload Inputs with Constraint Guidance
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -26,28 +26,28 @@ so that I can prepare a valid generation job without confusion.
 
 ## Tasks / Subtasks
 
-- [ ] Establish canonical input constraint definitions (AC: 2, 3)
-  - [ ] Add a single source of truth for MVP numeric and enum limits (max duration, max resolution dimensions or tier labels, allowed format list) consumable by mobile; prefer `packages/contracts` exported constants or typed config shared with future backend DTO validation in Story 1.3+.
-  - [ ] If product has not yet ratified exact numbers, use clearly named placeholder constants (e.g. `MAX_SOURCE_VIDEO_DURATION_SEC`) with a short comment block listing the stakeholder decision needed — do not scatter magic numbers in UI.
-- [ ] Create-job feature scaffold aligned with architecture (AC: 1, 4, 5)
-  - [ ] Introduce `apps/mobile/src/features/create-job/` with `screens/`, `components/`, `hooks/`, `types/` as needed (architecture target tree).
-  - [ ] Add an Expo Router screen route (e.g. `apps/mobile/src/app/create-job.tsx` or equivalent) that renders the create flow and keeps one dominant primary action per step (UX-DR1).
-- [ ] Linear two-input selection UX (AC: 1)
-  - [ ] Implement distinct pick actions: source video (video-only) and reference image (image-only) using `expo-image-picker` (`launchImageLibraryAsync` with appropriate `mediaTypes` / options — video slot vs image slot must not accept the wrong media category).
-  - [ ] Enforce replacement semantics: re-picking replaces the prior asset for that slot; never allow two videos or zero video while claiming “ready” for the video slot.
-  - [ ] Surface selected state clearly (filename or thumbnail/preview where feasible without blocking on heavy processing).
-- [ ] Constraint and format guidance UI (AC: 2, 3)
-  - [ ] Render a compact, scannable “Requirements” / helper region that lists duration, resolution, and format limits from the shared config (not hard-coded strings diverging from constants).
-  - [ ] Avoid duplicating the full inline validation experience of Story 1.3 here: this story is visibility + selection enforcement; detailed invalid-state UX belongs in 1.3.
-- [ ] Accessibility & visual semantics (AC: 4, 5)
-  - [ ] Meet 44×44 pt minimum touch targets for primary pickers and primary navigation actions on this surface (UX-DR12).
-  - [ ] Pair color with text/icon for state (non-color-only cues).
-  - [ ] Verify contrast for primary and semantic colors against WCAG 2.2 AA for normal text and UI components on default light/dark theme tokens used on this screen.
-- [ ] Testing (AC: 1, 5)
-  - [ ] Add focused unit tests for selection reducer/hook logic: only one video, only one image, replace-on-repick.
-  - [ ] Add at least one RTL/component test asserting critical `testID`s exist on primary interactive roots.
-- [ ] Quality gates
-  - [ ] `npm run lint`, `npm run typecheck`, and mobile test script from repo root remain green.
+- [x] Establish canonical input constraint definitions (AC: 2, 3)
+  - [x] Add a single source of truth for MVP numeric and enum limits (max duration, max resolution dimensions or tier labels, allowed format list) consumable by mobile; prefer `packages/contracts` exported constants or typed config shared with future backend DTO validation in Story 1.3+.
+  - [x] If product has not yet ratified exact numbers, use clearly named placeholder constants (e.g. `MAX_SOURCE_VIDEO_DURATION_SEC`) with a short comment block listing the stakeholder decision needed — do not scatter magic numbers in UI.
+- [x] Create-job feature scaffold aligned with architecture (AC: 1, 4, 5)
+  - [x] Introduce `apps/mobile/src/features/create-job/` with `screens/`, `components/`, `hooks/`, `types/` as needed (architecture target tree).
+  - [x] Add an Expo Router screen route (e.g. `apps/mobile/src/app/create-job.tsx` or equivalent) that renders the create flow and keeps one dominant primary action per step (UX-DR1).
+- [x] Linear two-input selection UX (AC: 1)
+  - [x] Implement distinct pick actions: source video (video-only) and reference image (image-only) using `expo-image-picker` (`launchImageLibraryAsync` with appropriate `mediaTypes` / options — video slot vs image slot must not accept the wrong media category).
+  - [x] Enforce replacement semantics: re-picking replaces the prior asset for that slot; never allow two videos or zero video while claiming “ready” for the video slot.
+  - [x] Surface selected state clearly (filename or thumbnail/preview where feasible without blocking on heavy processing).
+- [x] Constraint and format guidance UI (AC: 2, 3)
+  - [x] Render a compact, scannable “Requirements” / helper region that lists duration, resolution, and format limits from the shared config (not hard-coded strings diverging from constants).
+  - [x] Avoid duplicating the full inline validation experience of Story 1.3 here: this story is visibility + selection enforcement; detailed invalid-state UX belongs in 1.3.
+- [x] Accessibility & visual semantics (AC: 4, 5)
+  - [x] Meet 44×44 pt minimum touch targets for primary pickers and primary navigation actions on this surface (UX-DR12).
+  - [x] Pair color with text/icon for state (non-color-only cues).
+  - [x] Verify contrast for primary and semantic colors against WCAG 2.2 AA for normal text and UI components on default light/dark theme tokens used on this screen.
+- [x] Testing (AC: 1, 5)
+  - [x] Add focused unit tests for selection reducer/hook logic: only one video, only one image, replace-on-repick.
+  - [x] Add at least one RTL/component test asserting critical `testID`s exist on primary interactive roots.
+- [x] Quality gates
+  - [x] `npm run lint`, `npm run typecheck`, and mobile test script from repo root remain green.
 
 ## Dev Notes
 
@@ -120,14 +120,50 @@ so that I can prepare a valid generation job without confusion.
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5.1 Codex
 
 ### Debug Log References
 
+- Mobile: `npx expo install expo-image-picker` reported a post-install Expo CLI plugin error (`autoAddConfigPlugins.js`); dependency was still written to `package.json` and `app.json` includes the `expo-image-picker` config plugin manually.
+- Jest: Initial `jest@30` + `jest-expo` mismatch caused `import outside test scope` from Expo winter runtime; resolved with `jest@29.7.x` per `jest-expo` peer alignment.
+
 ### Completion Notes List
 
+- Implemented `packages/contracts` `input-constraints.ts` as single source for MVP limits + FR10-style format copy (`getCreateJobConstraintBullets()`), with placeholder comments for stakeholder-finalized numbers.
+- Added `create-job` feature (screen, constraint card, media slots with `expo-image-picker`, reducer + hook). Third bottom tab “Create” routes to `create-job`; `mediaTypes` uses `videos` vs `images` only; `allowsMultipleSelection: false`.
+- Theme extended with `primary` / `onPrimary` / info surfaces for WCAG-minded CTA and requirement chip styling; pickers use ≥44pt touch height and bullet + label pattern (not color-only).
+- Tests: Jest + `jest-expo` + RTL; reducer unit tests; `CreateJobScreen` testIDs. Root `overrides` pin `@types/react` to dedupe; mobile `tsconfig` excludes `*.test.*` from `tsc`; web tabs `Pressable` ref typing fixed via `PressableProps` cast.
+
 ### File List
+
+- `package.json`
+- `package-lock.json`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `_bmad-output/implementation-artifacts/1-2-upload-inputs-with-constraint-guidance.md`
+- `packages/contracts/src/index.ts`
+- `packages/contracts/src/input-constraints.ts`
+- `apps/mobile/app.json`
+- `apps/mobile/expo-env.d.ts`
+- `apps/mobile/jest.config.js`
+- `apps/mobile/jest/cssMock.js`
+- `apps/mobile/package.json`
+- `apps/mobile/tsconfig.json`
+- `apps/mobile/src/app/create-job.tsx`
+- `apps/mobile/src/components/app-tabs.tsx`
+- `apps/mobile/src/components/app-tabs.web.tsx`
+- `apps/mobile/src/components/themed-text.tsx`
+- `apps/mobile/src/constants/theme.ts`
+- `apps/mobile/src/features/create-job/components/constraint-guidance.tsx`
+- `apps/mobile/src/features/create-job/components/media-slot-picker.tsx`
+- `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.ts`
+- `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.test.ts`
+- `apps/mobile/src/features/create-job/hooks/use-job-input-selection.ts`
+- `apps/mobile/src/features/create-job/screens/create-job-screen.tsx`
+- `apps/mobile/src/features/create-job/screens/create-job-screen.test.tsx`
+- `apps/mobile/src/features/create-job/types/selection.ts`
+- `apps/mobile/test/smoke.test.js` (removed)
 
 ## Change Log
 
 - 2026-03-25: Story context generated via `/bmad-create-story` — Ultimate context engine analysis completed - comprehensive developer guide created.
+- 2026-03-25: Story 1.2 implemented — contracts input limits, create-job UI with `expo-image-picker`, a11y/testIDs, Jest+RTL tests; sprint status → review.

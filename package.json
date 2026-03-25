@@ -6,6 +6,12 @@
     "apps/*",
     "packages/*"
   ],
+  "overrides": {
+    "@types/react": "~19.2.2"
+  },
+  "dependencies": {
+    "expo-router": "~55.0.7"
+  },
   "scripts": {
     "lint": "npm run lint --workspace mobile && npm run lint --workspace backend && npm run lint --workspace @banyone/contracts",
     "typecheck": "npm run typecheck --workspace mobile && npm run typecheck --workspace backend && npm run typecheck --workspace @banyone/contracts",
