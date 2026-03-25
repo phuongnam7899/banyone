@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>banyone UX Color Themes</title>
+  <style>
+    :root { --bg:#0f1115; --card:#171a21; --text:#e9edf5; --muted:#a7b0c0; --border:#2a3040; }
+    * { box-sizing:border-box; font-family: Inter, Segoe UI, Arial, sans-serif; }
+    body { margin:0; background:var(--bg); color:var(--text); }
+    .wrap { max-width:1200px; margin:0 auto; padding:24px; }
+    h1 { margin:0 0 8px; font-size:28px; }
+    p { margin:0 0 20px; color:var(--muted); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px; overflow:hidden; }
+    .head { padding:14px 16px; border-bottom:1px solid var(--border); font-weight:600; }
+    .palette { display:grid; grid-template-columns:repeat(5,1fr); }
+    .swatch { min-height:70px; display:flex; align-items:flex-end; padding:8px; font-size:11px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.5); }
+    .demo { padding:14px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .btn { border:0; border-radius:10px; padding:9px 12px; color:#fff; font-weight:600; }
+    .tag { border-radius:999px; padding:5px 10px; font-size:12px; border:1px solid var(--border); color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>banyone Color Theme Explorer</h1>
+    <p>Three candidate themes aligned with the UX spec: clarity-first, creator-balanced, and expressive.</p>
+    <div class="grid">
+      <section class="card">
+        <div class="head">Theme A - Clarity First</div>
+        <div class="palette">
+          <div class="swatch" style="background:#3b82f6">Primary</div>
+          <div class="swatch" style="background:#10b981">Success</div>
+          <div class="swatch" style="background:#f59e0b">Warning</div>
+          <div class="swatch" style="background:#ef4444">Error</div>
+          <div class="swatch" style="background:#111827">Surface</div>
+        </div>
+        <div class="demo">
+          <button class="btn" style="background:#3b82f6">Submit</button>
+          <button class="btn" style="background:#10b981">Export</button>
+          <span class="tag">Status: Processing</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="head">Theme B - Creator Balanced</div>
+        <div class="palette">
+          <div class="swatch" style="background:#7c3aed">Primary</div>
+          <div class="swatch" style="background:#06b6d4">Accent</div>
+          <div class="swatch" style="background:#22c55e">Success</div>
+          <div class="swatch" style="background:#fb7185">Error</div>
+          <div class="swatch" style="background:#0b1020">Surface</div>
+        </div>
+        <div class="demo">
+          <button class="btn" style="background:#7c3aed">Generate</button>
+          <button class="btn" style="background:#06b6d4">Preview</button>
+          <span class="tag">Mood: Creative</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="head">Theme C - Expressive Accent</div>
+        <div class="palette">
+          <div class="swatch" style="background:#2563eb">Primary</div>
+          <div class="swatch" style="background:#f43f5e">Accent</div>
+          <div class="swatch" style="background:#14b8a6">Success</div>
+          <div class="swatch" style="background:#f97316">Warning</div>
+          <div class="swatch" style="background:#0f172a">Surface</div>
+        </div>
+        <div class="demo">
+          <button class="btn" style="background:#2563eb">Try Again</button>
+          <button class="btn" style="background:#f43f5e">Share</button>
+          <span class="tag">Mood: Bold</span>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>

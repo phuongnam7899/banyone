@@ -1,0 +1,82 @@
+# generated: 2026-03-24T20:56:25+07:00
+# last_updated: 2026-03-24T21:31:00+07:00
+# project: banyone
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+#
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog -> in-progress: Automatically when first story is created (via create-story)
+#   - in-progress -> done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-03-24T20:56:25+07:00
+last_updated: 2026-03-24T21:31:00+07:00
+project: banyone
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  epic-1: in-progress
+  1-1-set-up-initial-project-from-starter-template: review
+  1-2-upload-inputs-with-constraint-guidance: backlog
+  1-3-pre-submit-validation-and-fixable-errors: backlog
+  1-4-submit-job-with-immediate-acknowledgment: backlog
+  1-5-real-time-status-timeline-with-retry-path: backlog
+  1-6-preview-export-and-native-share: backlog
+  1-7-persist-drafts-and-recover-interrupted-uploads: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-lightweight-user-identity-and-session-binding: backlog
+  2-2-job-history-list-and-detail-views: backlog
+  2-3-user-facing-rate-limit-notices: backlog
+  2-4-lifecycle-push-notifications: backlog
+  2-5-notification-preferences-management: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-synthetic-media-disclosure-gate: backlog
+  3-2-policy-screening-at-job-acceptance: backlog
+  3-3-in-app-reporting-for-generated-outputs: backlog
+  3-4-moderation-queue-and-actions: backlog
+  3-5-abuse-throttling-controls: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-job-diagnostics-view-for-support: backlog
+  4-2-standard-recovery-guidance-playbooks: backlog
+  4-3-escalation-workflow-with-context-handoff: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-funnel-event-instrumentation: backlog
+  5-2-time-to-preview-and-reliability-metrics: backlog
+  5-3-per-job-cost-signal-pipeline: backlog
+  5-4-quality-tier-outcome-comparison: backlog
+  epic-5-retrospective: optional

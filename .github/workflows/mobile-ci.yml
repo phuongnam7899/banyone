@@ -1,0 +1,31 @@
+name: Mobile CI
+
+on:
+  push:
+    paths:
+      - "apps/mobile/**"
+      - "packages/contracts/**"
+      - "package.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/mobile-ci.yml"
+  pull_request:
+    paths:
+      - "apps/mobile/**"
+      - "packages/contracts/**"
+      - "package.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/mobile-ci.yml"
+
+jobs:
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install
+      - run: npm run lint --workspace mobile
+      - run: npm run typecheck --workspace mobile
+      - run: npm run test --workspace mobile
