@@ -5,12 +5,14 @@ on:
     paths:
       - "packages/contracts/**"
       - "package.json"
+      - "package-lock.json"
       - "tsconfig.base.json"
       - ".github/workflows/contract-ci.yml"
   pull_request:
     paths:
       - "packages/contracts/**"
       - "package.json"
+      - "package-lock.json"
       - "tsconfig.base.json"
       - ".github/workflows/contract-ci.yml"
 

@@ -45,6 +45,22 @@ so that subsequent stories can deliver user-facing value on a stable, consistent
   - [x] Update `README.md` with prerequisites and first-run steps for mobile/backend.
   - [x] Include exact commands for lint/typecheck/test and app start commands.
 
+### Review Follow-ups (AI)
+
+- [x] [AI-Review] Fix apps/mobile gitlink: convert to normal directory or proper submodule + CI
+- [x] [AI-Review] Align pnpm vs npm: remove pnpm-workspace.yaml or standardize on pnpm
+- [x] [AI-Review] CI workflows: add package-lock.json to paths filters so dep-only changes run gates
+- [x] [AI-Review] packages/contracts: add build/prepare for dist entrypoints or point main/types at src until build exists
+- [x] [AI-Review] packages/contracts: fix lint script / naming (avoid duplicate typecheck-only “lint”)
+- [x] [AI-Review] apps/backend main.ts: handle bootstrap failures (no unhandled rejections on listen/init)
+- [x] [AI-Review] apps/backend e2e: teardown app (e.g. afterEach app.close) to avoid leaks
+- [x] [AI-Review] After mobile git fix: align committed apps/mobile with root package-lock.json (no lockfile drift)
+
+### Deferred follow-ups (out of scope for this pass)
+
+- npm audit: 6 moderate dev-only ajv via Nest CLI — revisit with upstream Nest/CLI bumps
+- apps/backend tsconfig: optional strictness alignment with monorepo base `tsconfig`
+
 ## Dev Notes
 
 ### Story Type and Scope Guardrails
@@ -134,10 +150,12 @@ gpt-5.3-codex-low
 - Added CI baseline workflows for mobile, backend, and contracts lint/typecheck/test execution.
 - Added deterministic mobile baseline unit test command and preserved Nest starter test setup.
 - Story status set to `review`.
+- Resolved review follow-ups: converted `apps/mobile` from broken gitlink to normal tree (removed nested `.git`, dropped per-app lockfile), removed `pnpm-workspace.yaml` in favor of npm workspaces, added `package-lock.json` to CI path filters, contracts `build`/`prepare` + ESLint-based `lint`, bootstrap `.catch` + e2e `afterEach` teardown; `npm run lint`, `typecheck`, `test`, and backend `test:e2e` verified from repo root.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/1-1-set-up-initial-project-from-starter-template.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
 - `.editorconfig`
 - `.env.example`
 - `.gitignore`
@@ -147,14 +165,15 @@ gpt-5.3-codex-low
 - `README.md`
 - `package.json`
 - `package-lock.json`
-- `pnpm-workspace.yaml`
 - `tsconfig.base.json`
 - `apps/backend/*` (NestJS starter scaffold and config updates)
-- `apps/mobile/*` (Expo starter scaffold, lint setup, and baseline test wiring)
+- `apps/mobile/*` (Expo starter scaffold, lint setup, and baseline test wiring; no nested `package-lock.json`)
 - `packages/contracts/package.json`
+- `packages/contracts/eslint.config.mjs`
 - `packages/contracts/src/index.ts`
 - `packages/contracts/tsconfig.json`
 
 ### Change Log
 
 - 2026-03-24: Bootstrapped Expo + NestJS monorepo foundation, added contracts package and CI baseline workflows, and validated lint/typecheck/test command paths.
+- 2026-03-25: Addressed story 1.1 code-review follow-ups: normal `apps/mobile` tree, npm-only workspace (removed `pnpm-workspace.yaml`), CI triggers on lockfile changes, contracts build/lint split, safer Nest bootstrap and e2e teardown; refreshed root `package-lock.json`.
