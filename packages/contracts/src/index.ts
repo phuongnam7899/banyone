@@ -11,6 +11,22 @@ export {
   MAX_SOURCE_VIDEO_WIDTH_PX,
   SUPPORTED_IMAGE_FORMAT_DESCRIPTORS,
   SUPPORTED_VIDEO_FORMAT_DESCRIPTORS,
-} from "./input-constraints";
+} from "./input-constraints.js";
 
-export type { ConstraintBullet } from "./input-constraints";
+export type { ConstraintBullet } from "./input-constraints.js";
+
+export {
+  validateImageInputCompliance,
+  validateJobInputCompliance,
+  validateVideoInputCompliance,
+} from "./input-validation.js";
+
+export type {
+  ImageValidationInput,
+  InputViolation,
+  InputViolationCode,
+  JobInputValidationResult,
+  MediaValidationStatus,
+  SlotValidationResult,
+  VideoValidationInput,
+} from "./input-validation.js";

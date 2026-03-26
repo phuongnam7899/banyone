@@ -1,6 +1,6 @@
 # Story 1.3: Pre-Submit Validation and Fixable Errors
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -32,68 +32,96 @@ so that I can correct invalid inputs quickly and continue.
 
 ## Tasks / Subtasks
 
-- [ ] Extend input selection state to carry media metadata needed for validation (AC: 1, 4)
-  - [ ] Update `apps/mobile/src/features/create-job/types/selection.ts` to add optional metadata fields for:
+- [x] Extend input selection state to carry media metadata needed for validation (AC: 1, 4)
+  - [x] Update `apps/mobile/src/features/create-job/types/selection.ts` to add optional metadata fields for:
     - video: duration (sec), widthPx, heightPx, mimeType/type
     - image: widthPx, heightPx, mimeType/type
-  - [ ] Update `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.ts` to store the new metadata alongside `uri` and `label` (keep existing behavior for re-pick/clear).
-  - [ ] Update `apps/mobile/src/features/create-job/hooks/use-job-input-selection.ts` to capture `ImagePickerAsset` metadata from `expo-image-picker` (use these properties when available):
+  - [x] Update `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.ts` to store the new metadata alongside `uri` and `label` (keep existing behavior for re-pick/clear).
+  - [x] Update `apps/mobile/src/features/create-job/hooks/use-job-input-selection.ts` to capture `ImagePickerAsset` metadata from `expo-image-picker` (use these properties when available):
     - `duration` (video)
     - `width`/`height`
     - `mimeType` and/or `type`
     - fallback to parsing file extension from `fileName`/uri when `mimeType` is missing.
-  - [ ] Update `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.test.ts` to cover metadata persistence and replacement semantics on re-pick.
-  - [ ] Update any existing test mocks for `useJobInputSelection` (notably `create-job-screen.test.tsx`) so they compile with the expanded state type.
+  - [x] Update `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.test.ts` to cover metadata persistence and replacement semantics on re-pick.
+  - [x] Update any existing test mocks for `useJobInputSelection` (notably `create-job-screen.test.tsx`) so they compile with the expanded state type.
 
-- [ ] Implement deterministic validation logic with exact failure reasons (AC: 1, 2, 4)
-  - [ ] Add pure validation helpers (preferably in `packages/contracts`) that validate the selected media metadata against:
+- [x] Implement deterministic validation logic with exact failure reasons (AC: 1, 2, 4)
+  - [x] Add pure validation helpers (preferably in `packages/contracts`) that validate the selected media metadata against:
     - `MAX_SOURCE_VIDEO_DURATION_SEC`
     - `MAX_SOURCE_VIDEO_WIDTH_PX` / `MAX_SOURCE_VIDEO_HEIGHT_PX`
     - `MAX_REFERENCE_IMAGE_WIDTH_PX` / `MAX_REFERENCE_IMAGE_HEIGHT_PX`
     - `SUPPORTED_VIDEO_FORMAT_DESCRIPTORS` / `SUPPORTED_IMAGE_FORMAT_DESCRIPTORS`
-  - [ ] The validation layer must return structured results for each slot, including:
+  - [x] The validation layer must return structured results for each slot, including:
     - `status`: `pending` | `valid` | `invalid-with-fix`
     - `violations`: list of violations, each with:
       - deterministic `code` (example: `INPUT_VIDEO_DURATION_EXCEEDS_MAX`, `INPUT_VIDEO_RESOLUTION_EXCEEDS_MAX`, `INPUT_IMAGE_RESOLUTION_EXCEEDS_MAX`, `INPUT_VIDEO_FORMAT_UNSUPPORTED`, `INPUT_IMAGE_FORMAT_UNSUPPORTED`, `INPUT_METADATA_UNAVAILABLE`)
       - `message`: exact plain-language explanation using shared constants
       - `fixAction`: plain-language recovery instruction
-  - [ ] Ensure “missing metadata” is handled deterministically:
+  - [x] Ensure “missing metadata” is handled deterministically:
     - if required fields are missing to validate a constraint, return `invalid-with-fix` with code `INPUT_METADATA_UNAVAILABLE` and a recovery action to re-pick/use a supported file (no crashing, no silent acceptance).
 
-- [ ] Create the reusable Input Compliance Checker UI (AC: 1, 2, 3, 5)
-  - [ ] Add `apps/mobile/src/features/create-job/components/input-compliance-checker.tsx` (or similarly named) with these behaviors:
+- [x] Create the reusable Input Compliance Checker UI (AC: 1, 2, 3, 5)
+  - [x] Add `apps/mobile/src/features/create-job/components/input-compliance-checker.tsx` (or similarly named) with these behaviors:
     - **Pending**: show when metadata is not yet available (e.g. before selection, or when metadata is missing)
     - **Valid**: show a compact success/“looks good” state (must still be accessible)
      - **Invalid-with-fix**: show field-linked error text + a direct recovery action button per affected slot
-  - [ ] Field-linking:
+  - [x] Field-linking:
     - video violations render under the video slot and include testIDs that clearly identify the video slot
     - image violations render under the image slot and include testIDs that clearly identify the image slot
-  - [ ] Add deterministic `testID`s for:
+  - [x] Add deterministic `testID`s for:
     - the component container
     - each violation message block (per code)
     - each recovery action button (per code)
-  - [ ] Accessibility:
+  - [x] Accessibility:
     - error blocks are screen-reader accessible (no “color-only” states)
     - use `accessibilityLabel`s matching the user-visible message (or a clear equivalent)
     - avoid spinner-only feedback; prefer explicit short stage labels (“Validating…”, “Ready”, “Needs fix”).
 
-- [ ] Integrate checker into Create Job screen (AC: 3)
-  - [ ] Wire checker into `apps/mobile/src/features/create-job/screens/create-job-screen.tsx` so it re-renders when selection metadata changes.
-  - [ ] Place the checker immediately after the two media slots so errors appear “in context” before the next story’s submit flow.
+- [x] Integrate checker into Create Job screen (AC: 3)
+  - [x] Wire checker into `apps/mobile/src/features/create-job/screens/create-job-screen.tsx` so it re-renders when selection metadata changes.
+  - [x] Place the checker immediately after the two media slots so errors appear “in context” before the next story’s submit flow.
 
-- [ ] Add/extend tests for validator + component rendering (AC: 1, 2, 5)
-  - [ ] Add unit tests for the pure validation helpers to verify:
+- [x] Add/extend tests for validator + component rendering (AC: 1, 2, 5)
+  - [x] Add unit tests for the pure validation helpers to verify:
     - exact messages include the shared max values
     - correct violation codes are returned for each constraint breach
     - metadata-missing path returns `INPUT_METADATA_UNAVAILABLE`
-  - [ ] Add component tests using React Native Testing Library asserting:
+  - [x] Add component tests using React Native Testing Library asserting:
     - pending state when video/image metadata is absent
     - invalid-with-fix state renders exact error message + recovery action button
     - `testID`s exist for error blocks and recovery actions
-  - [ ] Update existing `create-job-screen.test.tsx` expectations to include new component `testID`(s).
+  - [x] Update existing `create-job-screen.test.tsx` expectations to include new component `testID`(s).
 
-- [ ] Quality gates (AC: 5)
-  - [ ] Ensure repo root `npm run lint`, `npm run typecheck`, and `npm run test` pass after the type/test updates.
+- [x] Quality gates (AC: 5)
+  - [x] Ensure repo root `npm run lint`, `npm run typecheck`, and `npm run test` pass after the type/test updates.
+
+- [x] Follow-up hardening: make format error copy match the shared bullets exactly (AC: 4)
+  - [x] Update `packages/contracts/src/input-validation.ts` so "supported formats" error text is derived from `getCreateJobConstraintBullets()` (or otherwise guaranteed to be string-identical to the `Formats` guidance used in the UI).
+  - [x] Add/extend unit tests to assert the exact "Supported:" message composition.
+
+- [x] Follow-up hardening: fix `webp` MIME inference on mobile (AC: 4)
+  - [x] Update `apps/mobile/src/features/create-job/hooks/use-job-input-selection.ts` to map `webp`/`.webp` to `image/webp` in `mimeTypeFromExtension()`.
+  - [x] Normalize extension casing (and/or add defensive parsing) so `.WEBP` and similar variants behave consistently.
+  - [x] Add/extend tests to ensure `.webp` images validate as supported instead of returning `INPUT_METADATA_UNAVAILABLE` (when width/height are present).
+
+- [x] Follow-up hardening: treat non-finite numeric metadata as "metadata unavailable" (AC: 1, 4)
+  - [x] Update `packages/contracts/src/input-validation.ts` to treat `NaN` / non-finite values for `durationSec` / `widthPx` / `heightPx` as missing metadata and return `INPUT_METADATA_UNAVAILABLE`.
+  - [x] Add unit tests that cover `NaN`, `Infinity`, and negative values (if they can occur) to ensure validation never silently marks invalid metadata as `valid`.
+
+- [x] Follow-up hardening: robust MIME normalization & deterministic parsing (AC: 1, 4)
+  - [x] Update `normalizeMimeType()` / format matching logic to deterministically handle:
+    - malformed MIME tokens (e.g. "image" or "video" without `/`)
+    - comma-separated MIME alternatives (e.g. `video/mp4, video/quicktime`)
+  - [x] Ensure those cases produce `INPUT_METADATA_UNAVAILABLE` (or the correct unsupported-code) rather than silently misclassifying support.
+  - [x] Add unit tests for the parsing edge cases above.
+
+- [x] Follow-up hardening: prevent UI violation key collisions (AC: 5)
+  - [x] Update `apps/mobile/src/features/create-job/components/input-compliance-checker.tsx` so React list keys for violations cannot collide even if the validator returns duplicate codes.
+  - [x] Add/extend component tests that render multiple violations for the same slot and assert both message blocks and fix buttons are present.
+
+- [x] Follow-up hardening: expand validator + component coverage for multi-violation rendering (AC: 1, 2, 5)
+  - [x] Add unit tests asserting multi-violation sets are returned deterministically (codes + ordering).
+  - [x] Add component tests ensuring all violations are rendered (no omission) and recovery buttons call the correct slot handlers.
 
 ## Dev Notes
 
@@ -185,12 +213,15 @@ GPT-5.4 Nano
 
 ### Completion Notes List
 
-- None yet (story is `ready-for-dev`).
+- Completed Task 1: selection state now stores video duration/resolution/mime and image resolution/mime captured from `expo-image-picker`, persisted via the reducer, and verified with updated unit + screen mock tests (mobile `npm test` passes).
+- Completed Task 2: added deterministic pure `validateJobInputCompliance` validators + violation taxonomy in `@banyone/contracts`, with mobile Jest unit tests covering duration, resolution, format-unsupported, and missing-metadata paths.
+- Completed Task 3/4: implemented `InputComplianceChecker` UI + integrated it into `CreateJobScreen`, including pending/invalid-with-fix rendering, deterministic `testID`s, accessibility labels, and dedicated component tests.
+- Completed Follow-up Hardening: string-identical supported-format error copy, `webp` MIME inference, non-finite/negative metadata handling, robust MIME parsing, UI key-collision prevention, and multi-violation ordering/rendering coverage (all verified via mobile Jest + repo-root typecheck/lint/test).
 
 ### File List
 
 - Expected new/updated files:
-  - `packages/contracts/src/input-constraints.ts` (extend with validation helpers + exports, if chosen)
+  - `packages/contracts/src/input-validation.ts` (added pure validation helpers + types)
   - `packages/contracts/src/index.ts` (export new validation helpers/types)
   - `apps/mobile/src/features/create-job/types/selection.ts`
   - `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.ts`
@@ -199,10 +230,18 @@ GPT-5.4 Nano
   - `apps/mobile/src/features/create-job/screens/create-job-screen.tsx`
   - `apps/mobile/src/features/create-job/hooks/job-input-selection-reducer.test.ts` (update)
   - `apps/mobile/src/features/create-job/screens/create-job-screen.test.tsx` (update)
-  - new unit tests for validation helpers
-  - new component tests for input compliance checker
+  - `apps/mobile/jest.config.js` (updated deterministic React/renderer resolution for tests)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml` (story status moved to `in-progress`)
+  - `package.json` (workspace overrides used to align test peer dependencies)
+  - `apps/mobile/src/features/create-job/validation/validate-job-inputs.test.ts` (added validation unit tests)
+  - `apps/mobile/src/features/create-job/components/input-compliance-checker.test.tsx` (added checker component tests)
+  - `apps/mobile/src/features/create-job/hooks/use-job-input-selection.mime.test.ts` (added WebP MIME inference tests)
 
 ## Change Log
 
 - 2026-03-25: Story 1.3 generated via `/bmad-create-story` — comprehensive developer guide created and sprint status updated to `ready-for-dev`.
+- 2026-03-25: Completed Task 1 — extend media selection state to carry duration/resolution/mime metadata (video + image) and updated reducer, hook, and tests accordingly. Verified with `npm test` + `npm run typecheck` for `mobile`.
+- 2026-03-25: Completed Task 2 — deterministic pure validation helpers + unit tests for violations (duration, resolution, format-unsupported, metadata-missing).
+- 2026-03-25: Completed Task 3/4 — `InputComplianceChecker` UI + `CreateJobScreen` integration + component tests (pending + invalid-with-fix).
+- 2026-03-25: Completed Follow-up Hardening — supported-format copy string identity, `webp` MIME inference, non-finite/negative metadata handling, robust MIME parsing, UI key-collision prevention, and multi-violation coverage.
 

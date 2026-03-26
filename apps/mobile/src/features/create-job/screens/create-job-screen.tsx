@@ -1,5 +1,5 @@
 import React from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -7,7 +7,12 @@ import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { ConstraintGuidance } from '@/features/create-job/components/constraint-guidance';
 import { MediaSlotPicker } from '@/features/create-job/components/media-slot-picker';
+import { InputComplianceChecker } from '@/features/create-job/components/input-compliance-checker';
 import { useJobInputSelection } from '@/features/create-job/hooks/use-job-input-selection';
+import { useJobSubmission } from '@/features/create-job/hooks/use-job-submission';
+import { JobStatusTimeline } from '@/features/job-status/components/job-status-timeline';
+import { useJobStatusPolling } from '@/features/job-status/hooks/use-job-status-polling';
+import { validateJobInputCompliance } from '@banyone/contracts';
 
 type Props = {
   colorScheme: 'light' | 'dark';
@@ -16,6 +21,61 @@ type Props = {
 export function CreateJobScreen({ colorScheme }: Props) {
   const colors = Colors[colorScheme];
   const { state, pickVideo, pickImage, clearVideo, clearImage } = useJobInputSelection();
+
+  const { isSubmitting, ack, submit } = useJobSubmission({
+    video: {
+      uri: state.videoUri,
+      durationSec: state.videoDurationSec,
+      widthPx: state.videoWidthPx,
+      heightPx: state.videoHeightPx,
+      mimeType: state.videoMimeType,
+    },
+    image: {
+      uri: state.imageUri,
+      widthPx: state.imageWidthPx,
+      heightPx: state.imageHeightPx,
+      mimeType: state.imageMimeType,
+    },
+  });
+
+  const validation = React.useMemo(() => {
+    return validateJobInputCompliance({
+      video: {
+        uri: state.videoUri,
+        durationSec: state.videoDurationSec,
+        widthPx: state.videoWidthPx,
+        heightPx: state.videoHeightPx,
+        mimeType: state.videoMimeType,
+      },
+      image: {
+        uri: state.imageUri,
+        widthPx: state.imageWidthPx,
+        heightPx: state.imageHeightPx,
+        mimeType: state.imageMimeType,
+      },
+    });
+  }, [
+    state.videoUri,
+    state.videoDurationSec,
+    state.videoWidthPx,
+    state.videoHeightPx,
+    state.videoMimeType,
+    state.imageUri,
+    state.imageWidthPx,
+    state.imageHeightPx,
+    state.imageMimeType,
+  ]);
+
+  const acceptedJobId = ack?.type === 'accepted' ? ack.jobId : null;
+  const initialJobStatus =
+    acceptedJobId && ack?.type === 'accepted'
+      ? { jobId: ack.jobId, status: ack.status, updatedAt: new Date().toISOString() }
+      : null;
+
+  const { status: polledJobStatus, isRefreshingStatus } = useJobStatusPolling(
+    acceptedJobId,
+    initialJobStatus,
+  );
 
   return (
     <ThemedView style={styles.container} testID="create-job.screen">
@@ -60,6 +120,134 @@ export function CreateJobScreen({ colorScheme }: Props) {
             onClear={clearImage}
           />
 
+          <InputComplianceChecker
+            colorScheme={colorScheme}
+            video={validation.video}
+            image={validation.image}
+            onPickVideo={pickVideo}
+            onPickImage={pickImage}
+          />
+
+          <Pressable
+            testID="create-job.submit.button"
+            accessibilityRole="button"
+            accessibilityLabel="Submit"
+            disabled={isSubmitting}
+            onPress={() => {
+              void submit();
+            }}
+            style={({ pressed }) => [
+              styles.submitButton,
+              {
+                backgroundColor: colors.primary,
+                opacity: isSubmitting ? 0.6 : pressed ? 0.85 : 1,
+                borderColor: colors.primary,
+              },
+            ]}>
+            <ThemedText type="small" style={{ color: colors.onPrimary }}>
+              {isSubmitting ? 'Submitting…' : 'Submit'}
+            </ThemedText>
+          </Pressable>
+
+          {ack?.type === 'accepted' ? (
+            <View style={{ gap: 12 }}>
+              <View
+                testID="create-job.submit.ack.accepted"
+                style={styles.ackAccepted}
+                accessibilityRole="text">
+                <ThemedText type="small" style={{ color: colors.text }}>
+                  Accepted
+                </ThemedText>
+                <ThemedText type="small" style={{ color: colors.textSecondary }}>
+                  Job ID: {ack.jobId}
+                </ThemedText>
+              </View>
+
+              {polledJobStatus ? (
+                <View style={{ marginTop: 0 }}>
+                  <JobStatusTimeline
+                    jobId={ack.jobId}
+                    status={polledJobStatus.status}
+                    etaSeconds={polledJobStatus.etaSeconds}
+                    failure={polledJobStatus.failure}
+                  />
+                </View>
+              ) : null}
+
+              {polledJobStatus?.status === 'failed' && polledJobStatus.failure?.retryable ? (
+                <Pressable
+                  testID="job-status.retry.button"
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry job"
+                  onPress={() => {
+                    void submit();
+                  }}
+                  disabled={isSubmitting || isRefreshingStatus}
+                  style={({ pressed }) => [
+                    styles.retryButton,
+                    {
+                      backgroundColor: colors.primary,
+                      opacity: isSubmitting || isRefreshingStatus ? 0.6 : pressed ? 0.85 : 1,
+                      borderColor: colors.primary,
+                    },
+                  ]}>
+                  <ThemedText type="small" style={{ color: colors.onPrimary }}>
+                    {isRefreshingStatus ? 'Refreshing…' : 'Retry'}
+                  </ThemedText>
+                </Pressable>
+              ) : null}
+
+              {polledJobStatus?.status === 'failed' &&
+              polledJobStatus.failure &&
+              !polledJobStatus.failure.retryable ? (
+                <View style={{ marginTop: 0 }}>
+                  <ThemedText type="small" style={{ color: colors.text }}>
+                    Failed. This error cannot be retried.
+                  </ThemedText>
+                  <ThemedText type="small" style={{ color: colors.textSecondary }}>
+                    Reason: {polledJobStatus.failure.reasonCode}
+                  </ThemedText>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          {ack?.type === 'rejected' ? (
+            <View testID="create-job.submit.ack.rejected" style={styles.ackRejected} accessibilityRole="text">
+              <ThemedText type="small" style={{ color: colors.text }}>
+                Rejected
+              </ThemedText>
+              {ack.violations.length > 0
+                ? ack.violations.map((v, idx) => (
+                    <View key={`${v.code}.${idx}`}>
+                      <ThemedText
+                        testID={`create-job.submit.ack.rejection.reason.${v.code}.${idx}`}
+                        type="small"
+                        accessibilityRole="text"
+                        style={{ color: colors.warningIcon }}>
+                        {v.message}
+                      </ThemedText>
+                      <ThemedText
+                        testID={`create-job.submit.ack.rejection.fix-action.${v.code}.${idx}`}
+                        type="small"
+                        accessibilityRole="text"
+                        style={{ color: colors.textSecondary }}>
+                        {v.fixAction}
+                      </ThemedText>
+                    </View>
+                  ))
+                : (
+                    <ThemedText
+                      testID="create-job.submit.ack.rejected.code"
+                      type="small"
+                      accessibilityRole="text"
+                      style={{ color: colors.textSecondary }}>
+                      {ack.code}
+                    </ThemedText>
+                  )}
+            </View>
+          ) : null}
+
           <View style={styles.footerNote} accessibilityRole="text">
             <ThemedText type="small" style={{ color: colors.textSecondary }}>
               Submission and deep validation arrive in the next stories; here you will always see the same limits the
@@ -95,5 +283,38 @@ const styles = StyleSheet.create({
   },
   footerNote: {
     marginTop: Spacing.two,
+  },
+  submitButton: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ackAccepted: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    padding: Spacing.two,
+    backgroundColor: 'transparent',
+  },
+  retryButton: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+  },
+  ackRejected: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    padding: Spacing.two,
+    backgroundColor: 'transparent',
   },
 });
