@@ -54,6 +54,30 @@ export type GenerationJobStatusEnvelope =
   | GenerationJobStatusSuccessEnvelope
   | GenerationJobErrorEnvelope;
 
+export type GenerationJobPreviewPayload = {
+  jobId: string;
+  status: 'ready';
+  updatedAt: string;
+  previewUri: string;
+  mimeType: 'video/mp4';
+};
+
+export type GenerationJobPreviewEnvelope =
+  | { data: GenerationJobPreviewPayload; error: null }
+  | GenerationJobErrorEnvelope;
+
+export type GenerationJobExportPayload = {
+  jobId: string;
+  status: 'ready';
+  updatedAt: string;
+  exportUri: string;
+  mimeType: 'video/mp4';
+};
+
+export type GenerationJobExportEnvelope =
+  | { data: GenerationJobExportPayload; error: null }
+  | GenerationJobErrorEnvelope;
+
 export type GenerationJobInputViolationDetail = {
   code: string;
   message: string;

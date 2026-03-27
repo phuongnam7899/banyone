@@ -2,6 +2,8 @@ import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
 import type { CreateGenerationJobRequestBody } from './dto/create-generation-job.request';
 import type {
   GenerationJobEnvelope,
+  GenerationJobExportEnvelope,
+  GenerationJobPreviewEnvelope,
   GenerationJobStatusEnvelope,
 } from './jobs.types';
 import { JobsService } from './jobs.service';
@@ -42,5 +44,19 @@ export class JobsController {
     @Param('id') id: string,
   ): Promise<GenerationJobStatusEnvelope> {
     return this.jobsService.getGenerationJobStatus({ jobId: id });
+  }
+
+  @Get('generation-jobs/:id/preview')
+  getGenerationJobPreview(
+    @Param('id') id: string,
+  ): Promise<GenerationJobPreviewEnvelope> {
+    return this.jobsService.getGenerationJobPreview({ jobId: id });
+  }
+
+  @Post('generation-jobs/:id/export')
+  createGenerationJobExport(
+    @Param('id') id: string,
+  ): Promise<GenerationJobExportEnvelope> {
+    return this.jobsService.createGenerationJobExport({ jobId: id });
   }
 }

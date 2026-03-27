@@ -30,3 +30,5 @@ export type {
   SlotValidationResult,
   VideoValidationInput,
 } from "./input-validation.js";
+
+export type { PreviewExportEvent, PreviewExportEventName } from './telemetry.js';

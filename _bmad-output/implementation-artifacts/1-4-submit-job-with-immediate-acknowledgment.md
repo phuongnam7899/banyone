@@ -1,6 +1,6 @@
 # Story 1.4: Submit Job with Immediate Acknowledgment
 
-Status: review
+Status: done
 
 ## Story
 
@@ -178,6 +178,7 @@ GPT-5.4 Nano
 - Story file generated via `/bmad-create-story` with sprint auto-discovery (next backlog story).
 
 ### Completion Notes List
+
 - Implemented backend `POST /v1/generation-jobs` with canonical success/error envelopes, contract-aligned validation via `validateJobInputCompliance()`, deterministic file-persisted idempotency (including restart behavior), and server-side acknowledgment telemetry (latency + outcome).
 - Updated mobile `CreateJobScreen` with a primary `create-job.submit.button`, immediate accepted/rejected acknowledgment UI, and a `useJobSubmission()` hook that generates and stores a stable idempotency key per attempt while enforcing in-flight locking to prevent rapid duplicate submissions.
 - Added/updated automated tests:
@@ -185,6 +186,7 @@ GPT-5.4 Nano
   - Mobile RTL component tests verifying `x-banyone-idempotency-key`, accepted/rejected rendering, and deterministic `testID`s.
 
 ### File List
+
 - `apps/backend/src/app.module.ts`
 - `apps/backend/src/modules/jobs/dto/create-generation-job.request.ts`
 - `apps/backend/src/modules/jobs/jobs.controller.ts`
@@ -197,4 +199,3 @@ GPT-5.4 Nano
 - `apps/mobile/src/features/create-job/screens/create-job-screen.test.tsx`
 - `apps/mobile/src/features/create-job/screens/create-job-submit.test.tsx`
 - `apps/mobile/src/features/create-job/types/create-generation-job.ts`
-

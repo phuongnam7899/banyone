@@ -1,6 +1,6 @@
 # Story 1.5: Real-Time Status Timeline with Retry Path
 
-Status: review
+Status: done
 
 ## Story
 

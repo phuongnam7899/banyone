@@ -154,6 +154,151 @@ describe('JobsController (e2e)', () => {
       });
   });
 
+  it('GET /v1/generation-jobs/:id/preview returns deterministic preview contract for ready jobs', async () => {
+    const jobsService = app!.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'e2e-preview-9';
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    await request(app!.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}/preview`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.error).toBeNull();
+        expect(res.body.data).toMatchObject({
+          jobId,
+          status: 'ready',
+          mimeType: 'video/mp4',
+          previewUri: `https://cdn.banyone.local/generated/${jobId}.mp4`,
+        });
+      });
+  });
+
+  it('GET /v1/generation-jobs/:id/preview returns deterministic PREVIEW_LOAD_FAILED envelope', async () => {
+    const jobsService = app!.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'e2e-preview-fail-1'; // last hex digit 1 => preview failure fixture
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    await request(app!.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}/preview`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.data).toBeNull();
+        expect(res.body.error).toMatchObject({
+          code: 'PREVIEW_LOAD_FAILED',
+          message: 'Preview failed to load. Please retry.',
+          retryable: true,
+          details: { stage: 'failed-preview' },
+        });
+        expect(res.body.error.traceId).toEqual(expect.any(String));
+      });
+  });
+
+  it('POST /v1/generation-jobs/:id/export returns deterministic export contract for ready jobs', async () => {
+    const jobsService = app!.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'e2e-export-8';
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    await request(app!.getHttpServer())
+      .post(`/v1/generation-jobs/${jobId}/export`)
+      .expect(201)
+      .expect((res) => {
+        expect(res.body.error).toBeNull();
+        expect(res.body.data).toMatchObject({
+          jobId,
+          status: 'ready',
+          mimeType: 'video/mp4',
+          exportUri: `file:///tmp/banyone/${jobId}.mp4`,
+        });
+      });
+  });
+
+  it('POST /v1/generation-jobs/:id/export returns deterministic EXPORT_PREPARATION_FAILED envelope', async () => {
+    const jobsService = app!.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'e2e-export-fail-2'; // last hex digit 2 => export failure fixture
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    await request(app!.getHttpServer())
+      .post(`/v1/generation-jobs/${jobId}/export`)
+      .expect(201)
+      .expect((res) => {
+        expect(res.body.data).toBeNull();
+        expect(res.body.error).toMatchObject({
+          code: 'EXPORT_PREPARATION_FAILED',
+          message: 'Unable to prepare export file. Please retry.',
+          retryable: true,
+          details: { outputStatePreserved: true },
+        });
+        expect(res.body.error.traceId).toEqual(expect.any(String));
+      });
+  });
+
+  it('preview/export endpoints keep lifecycle invariant and return JOB_NOT_READY for processing jobs', async () => {
+    const jobsService = app!.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'e2e-not-ready-a';
+
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'processing',
+      processingAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    await request(app!.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}/preview`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.data).toBeNull();
+        expect(res.body.error).toMatchObject({
+          code: 'JOB_NOT_READY',
+          retryable: true,
+        });
+      });
+
+    await request(app!.getHttpServer())
+      .post(`/v1/generation-jobs/${jobId}/export`)
+      .expect(201)
+      .expect((res) => {
+        expect(res.body.data).toBeNull();
+        expect(res.body.error).toMatchObject({
+          code: 'JOB_NOT_READY',
+          retryable: true,
+        });
+      });
+
+    await request(app!.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.error).toBeNull();
+        expect(res.body.data.status).toBe('processing');
+      });
+  });
+
   it('GET /v1/generation-jobs/:id does not skip queued -> ready in a single read', async () => {
     const jobsService = app!.get(JobsService);
     const jobId = 'e2e-skip-1';
@@ -199,5 +344,26 @@ describe('JobsController (e2e)', () => {
         );
         expect(res.body.data.failure.nextAction).toBe('retry');
       });
+  });
+
+  it('GET unknown route returns 404', () => {
+    return request(app!.getHttpServer())
+      .get('/v1/generation-jobs-unknown')
+      .expect(404);
+  });
+
+  it('POST /v1/generation-jobs returns 500 when service throws unexpectedly', async () => {
+    const jobsService = app!.get(JobsService);
+    const createSpy = jest
+      .spyOn(jobsService, 'createGenerationJob')
+      .mockRejectedValueOnce(new Error('simulated internal failure'));
+
+    await request(app!.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set('x-banyone-idempotency-key', 'idem-key-service-throw')
+      .send(validGenerationJobBody())
+      .expect(500);
+
+    createSpy.mockRestore();
   });
 });

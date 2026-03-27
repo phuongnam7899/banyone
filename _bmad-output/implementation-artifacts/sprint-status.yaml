@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-24T20:56:25+07:00
-last_updated: 2026-03-26T20:04:44+07:00
+last_updated: 2026-03-27T22:14:00+07:00
 project: banyone
 project_key: NOKEY
 tracking_system: file-system
@@ -47,8 +47,8 @@ development_status:
   1-2-upload-inputs-with-constraint-guidance: done
   1-3-pre-submit-validation-and-fixable-errors: done
   1-4-submit-job-with-immediate-acknowledgment: done
-  1-5-real-time-status-timeline-with-retry-path: review
-  1-6-preview-export-and-native-share: backlog
+  1-5-real-time-status-timeline-with-retry-path: done
+  1-6-preview-export-and-native-share: review
   1-7-persist-drafts-and-recover-interrupted-uploads: backlog
   epic-1-retrospective: optional
 

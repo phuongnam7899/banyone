@@ -129,5 +129,35 @@ describe('CreateJobScreen submit + ack', () => {
       expect(screen.getByTestId('create-job.submit.ack.accepted')).toBeTruthy();
     });
   });
+
+  it('shows network timeout rejection then allows retry to accepted state', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockResolvedValueOnce({
+        json: async () => ({
+          data: { jobId: 'job-retry-1', status: 'queued' },
+          error: null,
+        }),
+      });
+    (global as any).fetch = fetchMock;
+
+    render(<CreateJobScreen colorScheme="light" />);
+
+    fireEvent.press(screen.getByTestId('create-job.submit.button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('create-job.submit.ack.rejected')).toBeTruthy();
+    });
+    expect(screen.getByTestId('create-job.submit.ack.rejected.code').props.children).toBe('NETWORK_ERROR');
+
+    fireEvent.press(screen.getByTestId('create-job.submit.button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('create-job.submit.ack.accepted')).toBeTruthy();
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 

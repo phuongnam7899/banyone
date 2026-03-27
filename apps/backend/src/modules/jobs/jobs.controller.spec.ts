@@ -37,6 +37,28 @@ describe('JobsController', () => {
     };
   };
 
+  type PreviewSuccessEnvelope = {
+    data: {
+      jobId: string;
+      status: 'ready';
+      updatedAt: string;
+      previewUri: string;
+      mimeType: 'video/mp4';
+    };
+    error: null;
+  };
+
+  type ExportSuccessEnvelope = {
+    data: {
+      jobId: string;
+      status: 'ready';
+      updatedAt: string;
+      exportUri: string;
+      mimeType: 'video/mp4';
+    };
+    error: null;
+  };
+
   beforeEach(async () => {
     dataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-jobs-'));
     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
@@ -299,6 +321,115 @@ describe('JobsController', () => {
       message: 'Generation job not found.',
     });
     expect(body.error.traceId).toEqual(expect.any(String));
+  });
+
+  it('GET /v1/generation-jobs/:id/preview returns preview metadata for ready jobs', async () => {
+    const jobsService = app.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'job-preview-9';
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    const res = await request(app.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}/preview`)
+      .expect(200);
+
+    const body = res.body as PreviewSuccessEnvelope;
+    expect(body.error).toBeNull();
+    expect(body.data.jobId).toBe(jobId);
+    expect(body.data.status).toBe('ready');
+    expect(body.data.mimeType).toBe('video/mp4');
+    expect(body.data.previewUri).toContain(`${jobId}.mp4`);
+  });
+
+  it('POST /v1/generation-jobs/:id/export returns export file metadata for ready jobs', async () => {
+    const jobsService = app.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'job-export-8';
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/generation-jobs/${jobId}/export`)
+      .expect(201);
+
+    const body = res.body as ExportSuccessEnvelope;
+    expect(body.error).toBeNull();
+    expect(body.data.jobId).toBe(jobId);
+    expect(body.data.status).toBe('ready');
+    expect(body.data.mimeType).toBe('video/mp4');
+    expect(body.data.exportUri).toBe(`file:///tmp/banyone/${jobId}.mp4`);
+  });
+
+  it('preview/export endpoints return deterministic retryable errors for seeded failure fixtures', async () => {
+    const jobsService = app.get(JobsService);
+    const nowMs = Date.now();
+    jobsService.__testSeedJob({
+      jobId: 'job-preview-1',
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+    jobsService.__testSeedJob({
+      jobId: 'job-export-2',
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    const previewRes = await request(app.getHttpServer())
+      .get('/v1/generation-jobs/job-preview-1/preview')
+      .expect(200);
+    const previewBody = previewRes.body as ErrorEnvelope;
+    expect(previewBody.data).toBeNull();
+    expect(previewBody.error).toMatchObject({
+      code: 'PREVIEW_LOAD_FAILED',
+      retryable: true,
+    });
+
+    const exportRes = await request(app.getHttpServer())
+      .post('/v1/generation-jobs/job-export-2/export')
+      .expect(201);
+    const exportBody = exportRes.body as ErrorEnvelope;
+    expect(exportBody.data).toBeNull();
+    expect(exportBody.error).toMatchObject({
+      code: 'EXPORT_PREPARATION_FAILED',
+      retryable: true,
+    });
+  });
+
+  it('preview/export do not mutate lifecycle state outside queued->processing->ready|failed', async () => {
+    const jobsService = app.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'job-ready-invariant-9';
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    await request(app.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}/preview`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .post(`/v1/generation-jobs/${jobId}/export`)
+      .expect(201);
+
+    const statusRes = await request(app.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}`)
+      .expect(200);
+    const statusBody = statusRes.body as GenerationJobStatusEnvelope;
+    if (statusBody.error !== null) throw new Error('Expected success envelope');
+    expect(statusBody.data.status).toBe('ready');
   });
 
   it('reports illegalTransitionCount=0 after allowed lifecycle transitions', async () => {

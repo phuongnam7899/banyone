@@ -8,7 +8,9 @@ import { assertAllowedLifecycleTransition } from './jobs.lifecycle';
 import type { CreateGenerationJobRequestBody } from './dto/create-generation-job.request';
 import type {
   GenerationJobEnvelope,
+  GenerationJobExportEnvelope,
   GenerationJobInputViolationDetail,
+  GenerationJobPreviewEnvelope,
   GenerationJobStatus,
   GenerationJobValidationErrorDetails,
   GenerationJobErrorEnvelope,
@@ -295,6 +297,86 @@ export class JobsService {
     };
   }
 
+  getGenerationJobPreview(params: {
+    jobId: string;
+  }): GenerationJobPreviewEnvelope {
+    const job = this.store.jobs[params.jobId];
+    if (!job) {
+      return this.makeErrorEnvelope({
+        code: 'JOB_NOT_FOUND',
+        message: 'Generation job not found.',
+        retryable: false,
+      });
+    }
+    if (job.status !== 'ready') {
+      return this.makeErrorEnvelope({
+        code: 'JOB_NOT_READY',
+        message: 'Preview is available only after the job is ready.',
+        retryable: true,
+        details: { expectedStatus: 'ready', currentStatus: job.status },
+      });
+    }
+    if (this.shouldPreviewFail(job.jobId)) {
+      return this.makeErrorEnvelope({
+        code: 'PREVIEW_LOAD_FAILED',
+        message: 'Preview failed to load. Please retry.',
+        retryable: true,
+        details: { stage: 'failed-preview' },
+      });
+    }
+
+    return {
+      data: {
+        jobId: job.jobId,
+        status: 'ready',
+        updatedAt: new Date(job.updatedAtMs).toISOString(),
+        previewUri: `https://cdn.banyone.local/generated/${job.jobId}.mp4`,
+        mimeType: 'video/mp4',
+      },
+      error: null,
+    };
+  }
+
+  createGenerationJobExport(params: {
+    jobId: string;
+  }): GenerationJobExportEnvelope {
+    const job = this.store.jobs[params.jobId];
+    if (!job) {
+      return this.makeErrorEnvelope({
+        code: 'JOB_NOT_FOUND',
+        message: 'Generation job not found.',
+        retryable: false,
+      });
+    }
+    if (job.status !== 'ready') {
+      return this.makeErrorEnvelope({
+        code: 'JOB_NOT_READY',
+        message: 'Export is available only after the job is ready.',
+        retryable: true,
+        details: { expectedStatus: 'ready', currentStatus: job.status },
+      });
+    }
+    if (this.shouldExportFail(job.jobId)) {
+      return this.makeErrorEnvelope({
+        code: 'EXPORT_PREPARATION_FAILED',
+        message: 'Unable to prepare export file. Please retry.',
+        retryable: true,
+        details: { outputStatePreserved: true },
+      });
+    }
+
+    return {
+      data: {
+        jobId: job.jobId,
+        status: 'ready',
+        updatedAt: new Date(job.updatedAtMs).toISOString(),
+        exportUri: `file:///tmp/banyone/${job.jobId}.mp4`,
+        mimeType: 'video/mp4',
+      },
+      error: null,
+    };
+  }
+
   /**
    * Test/diagnostics helper for Story 1.5 observability:
    * ensures lifecycle transition integrity enforcement stays error-free.
@@ -487,6 +569,20 @@ export class JobsService {
     // - digit % 3 == 2 => ready
     // - digit % 3 == 0 or 1 => failed
     return digit % 3 !== 2;
+  }
+
+  private shouldPreviewFail(jobId: string): boolean {
+    return this.readDeterministicHexDigit(jobId) % 5 === 1;
+  }
+
+  private shouldExportFail(jobId: string): boolean {
+    return this.readDeterministicHexDigit(jobId) % 5 === 2;
+  }
+
+  private readDeterministicHexDigit(value: string): number {
+    const lastChar = (value ?? '').trim().slice(-1).toLowerCase();
+    if (/^[0-9a-f]$/.test(lastChar)) return parseInt(lastChar, 16);
+    return value.length % 16;
   }
 
   private buildFailureMetadata(params: { jobId: string }): {

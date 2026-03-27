@@ -12,6 +12,7 @@ import { useJobInputSelection } from '@/features/create-job/hooks/use-job-input-
 import { useJobSubmission } from '@/features/create-job/hooks/use-job-submission';
 import { JobStatusTimeline } from '@/features/job-status/components/job-status-timeline';
 import { useJobStatusPolling } from '@/features/job-status/hooks/use-job-status-polling';
+import { ReadyResultScreen } from '@/features/preview-export/screens/ready-result-screen';
 import { validateJobInputCompliance } from '@banyone/contracts';
 
 type Props = {
@@ -172,6 +173,10 @@ export function CreateJobScreen({ colorScheme }: Props) {
                     failure={polledJobStatus.failure}
                   />
                 </View>
+              ) : null}
+
+              {polledJobStatus?.status === 'ready' ? (
+                <ReadyResultScreen jobStatus={polledJobStatus} colorScheme={colorScheme} />
               ) : null}
 
               {polledJobStatus?.status === 'failed' && polledJobStatus.failure?.retryable ? (
