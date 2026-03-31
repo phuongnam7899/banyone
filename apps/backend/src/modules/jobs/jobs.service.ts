@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import { validateJobInputCompliance } from '@banyone/contracts';
 
+import { SyntheticMediaDisclosureStore } from '../disclosure/synthetic-media-disclosure.store';
+import { JobLifecyclePushService } from '../notifications/job-lifecycle-push.service';
 import { assertAllowedLifecycleTransition } from './jobs.lifecycle';
 import type { CreateGenerationJobRequestBody } from './dto/create-generation-job.request';
 import type {
@@ -25,6 +27,7 @@ const IDEMPOTENCY_SCOPING_SEP = '\u001f';
 
 /** Jobs and idempotency rows migrated from pre–Story 2.1 stores. */
 const LEGACY_UNSCOPED_USER_ID = '__legacy_unscoped__';
+const DISCLOSURE_REQUIRED_ERROR_CODE = 'DISCLOSURE_REQUIRED';
 
 type PersistedJobsStore = {
   version: 3;
@@ -75,7 +78,10 @@ export class JobsService {
   // Invariant metric: should remain 0 because the service only commits allowed transitions.
   private illegalTransitionCount = 0;
 
-  constructor() {
+  constructor(
+    private readonly jobLifecyclePush: JobLifecyclePushService,
+    private readonly disclosure: SyntheticMediaDisclosureStore,
+  ) {
     // Tests can set BANYONE_JOBS_DATA_DIR to isolate persistence.
     const configuredDir = process.env.BANYONE_JOBS_DATA_DIR;
     this.storeDir =
@@ -396,6 +402,19 @@ export class JobsService {
 
     // Persist any status changes to maintain canonical server truth.
     if (transition) this.saveStore();
+
+    if (transition) {
+      if (transition.to === 'ready') {
+        this.jobLifecyclePush.notifyJobReady(job.userId, job.jobId);
+      }
+      if (transition.to === 'failed' && job.failure) {
+        this.jobLifecyclePush.notifyJobFailed(
+          job.userId,
+          job.jobId,
+          job.failure,
+        );
+      }
+    }
 
     const payload = this.mapJobToStatusPayload({
       job,
@@ -791,6 +810,19 @@ export class JobsService {
     key: string;
     body: CreateGenerationJobRequestBody;
   }): GenerationJobEnvelope {
+    if (!this.disclosure.isAcceptedForUser(params.userId)) {
+      return this.makeErrorEnvelope({
+        code: DISCLOSURE_REQUIRED_ERROR_CODE,
+        message:
+          'Synthetic media disclosure acknowledgment is required before your first generation.',
+        retryable: false,
+        details: {
+          currentVersion: this.disclosure.getCurrentVersion(),
+          action: 'acknowledge_disclosure',
+        },
+      });
+    }
+
     const existing = this.store.idempotency[params.key];
     if (existing) {
       return this.makeSuccessEnvelope({
@@ -868,6 +900,7 @@ export class JobsService {
     this.saveStore();
 
     this.enqueuePlaceholderProcessing();
+    this.jobLifecyclePush.notifyJobQueued(params.userId, jobId);
     return this.makeSuccessEnvelope({ jobId, status });
   }
 }

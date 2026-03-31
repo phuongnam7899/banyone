@@ -22,6 +22,8 @@ import type {
 describe('JobsController', () => {
   let app: INestApplication;
   let dataDir: string;
+  let notifDataDir: string;
+  let disclosureDataDir: string;
   const authHeader = {
     Authorization: `Bearer ${BANYONE_TEST_FIREBASE_ID_TOKEN}`,
   };
@@ -91,7 +93,11 @@ describe('JobsController', () => {
 
   beforeEach(async () => {
     dataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-jobs-'));
+    notifDataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-notif-jobs-'));
+    disclosureDataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-disclosure-jobs-'));
     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
+    process.env.BANYONE_NOTIFICATIONS_DATA_DIR = notifDataDir;
+    process.env.BANYONE_DISCLOSURE_DATA_DIR = disclosureDataDir;
     process.env.BANYONE_AUTH_VERIFIER = 'test';
     process.env.BANYONE_AUTH_TEST_UID = 'test-user-uid';
 
@@ -102,6 +108,11 @@ describe('JobsController', () => {
     app = moduleRef.createNestApplication();
     app.useGlobalFilters(new ThrottlerEnvelopeExceptionFilter());
     await app.init();
+    await request(app.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(authHeader)
+      .send({ version: 'v1' })
+      .expect(200);
   });
 
   afterEach(async () => {
@@ -112,6 +123,20 @@ describe('JobsController', () => {
         force: true,
       });
       delete process.env.BANYONE_JOBS_DATA_DIR;
+    }
+    if (process.env.BANYONE_NOTIFICATIONS_DATA_DIR) {
+      rmSync(process.env.BANYONE_NOTIFICATIONS_DATA_DIR, {
+        recursive: true,
+        force: true,
+      });
+      delete process.env.BANYONE_NOTIFICATIONS_DATA_DIR;
+    }
+    if (process.env.BANYONE_DISCLOSURE_DATA_DIR) {
+      rmSync(process.env.BANYONE_DISCLOSURE_DATA_DIR, {
+        recursive: true,
+        force: true,
+      });
+      delete process.env.BANYONE_DISCLOSURE_DATA_DIR;
     }
     delete process.env.BANYONE_AUTH_VERIFIER;
     delete process.env.BANYONE_AUTH_TEST_UID;
@@ -183,6 +208,12 @@ describe('JobsController', () => {
   });
 
   it('POST /v1/generation-jobs returns success envelope + queued status', async () => {
+    await request(app.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(authHeader)
+      .send({ version: 'v1' })
+      .expect(200);
+
     const res = await request(app.getHttpServer())
       .post('/v1/generation-jobs')
       .set(authHeader)
@@ -194,6 +225,40 @@ describe('JobsController', () => {
     expect(body.error).toBeNull();
     expect(body.data.jobId).toEqual(expect.any(String));
     expect(body.data.status).toBe('queued');
+  });
+
+  it('POST /v1/generation-jobs returns DISCLOSURE_REQUIRED before first acknowledgment', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set('Authorization', 'Bearer test-valid-token-user-b')
+      .set('x-banyone-idempotency-key', 'idem-key-disclosure-blocked')
+      .send(validBody)
+      .expect(201);
+
+    const body = res.body as ErrorEnvelope;
+    expect(body.data).toBeNull();
+    expect(body.error.code).toBe('DISCLOSURE_REQUIRED');
+    expect(body.error.retryable).toBe(false);
+    expect(body.error.details).toMatchObject({
+      currentVersion: 'v1',
+      action: 'acknowledge_disclosure',
+    });
+  });
+
+  it('POST /v1/synthetic-media-disclosure/acknowledge records acceptance for authenticated user', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(authHeader)
+      .send({ version: 'v1' })
+      .expect(200);
+
+    expect(res.body.error).toBeNull();
+    expect(res.body.data).toMatchObject({
+      accepted: true,
+      currentVersion: 'v1',
+      acceptance: { version: 'v1' },
+    });
+    expect(res.body.data.acceptance.acceptedAt).toEqual(expect.any(String));
   });
 
   it('POST /v1/generation-jobs returns INPUT_INVALID error envelope with contract-aligned details', async () => {
@@ -307,6 +372,11 @@ describe('JobsController', () => {
 
   it('does not share idempotency mappings across different authenticated users', async () => {
     const sharedClientKey = 'idem-shared-client-key';
+    await request(app.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set('Authorization', 'Bearer test-valid-token-user-b')
+      .send({ version: 'v1' })
+      .expect(200);
 
     const userA = await request(app.getHttpServer())
       .post('/v1/generation-jobs')

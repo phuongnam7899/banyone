@@ -72,7 +72,11 @@ export function CreateJobScreen({ colorScheme }: Props) {
     [pendingIdempotencyKey, setPendingIdempotencyKey],
   );
 
-  const { isSubmittingJob, ack, submit } = useJobSubmission(createGenerationJobBody, jobSubmissionOptions);
+  const { isSubmittingJob, ack, submit, acknowledgeDisclosure } = useJobSubmission(
+    createGenerationJobBody,
+    jobSubmissionOptions,
+  );
+  const [isAcknowledgingDisclosure, setIsAcknowledgingDisclosure] = React.useState(false);
 
   React.useEffect(() => {
     if (ack?.type === 'accepted') {
@@ -227,7 +231,7 @@ export function CreateJobScreen({ colorScheme }: Props) {
             testID="create-job.submit.button"
             accessibilityRole="button"
             accessibilityLabel="Submit"
-            disabled={isSubmittingJob || isRestoringDraft}
+            disabled={isSubmittingJob || isRestoringDraft || isAcknowledgingDisclosure}
             onPress={() => {
               void submit();
             }}
@@ -235,14 +239,66 @@ export function CreateJobScreen({ colorScheme }: Props) {
               styles.submitButton,
               {
                 backgroundColor: colors.primary,
-                opacity: isSubmittingJob || isRestoringDraft ? 0.6 : pressed ? 0.85 : 1,
+                opacity:
+                  isSubmittingJob || isRestoringDraft || isAcknowledgingDisclosure
+                    ? 0.6
+                    : pressed
+                      ? 0.85
+                      : 1,
                 borderColor: colors.primary,
               },
             ]}>
             <ThemedText type="small" style={{ color: colors.onPrimary }}>
-              {isRestoringDraft ? 'Loading draft…' : isSubmittingJob ? 'Submitting…' : 'Submit'}
+              {isRestoringDraft
+                ? 'Loading draft…'
+                : isSubmittingJob
+                  ? 'Submitting…'
+                  : isAcknowledgingDisclosure
+                    ? 'Acknowledging…'
+                    : 'Submit'}
             </ThemedText>
           </Pressable>
+
+          {ack?.type === 'disclosure-required' ? (
+            <View
+              testID="create-job.disclosure-gate.container"
+              style={[styles.disclosureGate, { borderColor: colors.textSecondary }]}
+              accessibilityRole="alert">
+              <ThemedText type="small" style={{ color: colors.text }}>
+                Before your first generation, you must acknowledge our synthetic-media disclosure.
+              </ThemedText>
+              <ThemedText type="small" style={{ color: colors.textSecondary }}>
+                This confirms you understand acceptable use and platform expectations.
+              </ThemedText>
+              <Pressable
+                testID="create-job.disclosure-gate.acknowledge.button"
+                accessibilityRole="button"
+                accessibilityLabel="Acknowledge synthetic media disclosure"
+                disabled={isAcknowledgingDisclosure}
+                onPress={() => {
+                  void (async () => {
+                    setIsAcknowledgingDisclosure(true);
+                    const acknowledged = await acknowledgeDisclosure(ack.currentVersion);
+                    setIsAcknowledgingDisclosure(false);
+                    if (acknowledged) {
+                      await submit();
+                    }
+                  })();
+                }}
+                style={({ pressed }) => [
+                  styles.retryButton,
+                  {
+                    backgroundColor: colors.primary,
+                    opacity: isAcknowledgingDisclosure ? 0.6 : pressed ? 0.85 : 1,
+                    borderColor: colors.primary,
+                  },
+                ]}>
+                <ThemedText type="small" style={{ color: colors.onPrimary }}>
+                  {isAcknowledgingDisclosure ? 'Acknowledging…' : 'I acknowledge and continue'}
+                </ThemedText>
+              </Pressable>
+            </View>
+          ) : null}
 
           {ack?.type === 'accepted' ? (
             <View style={{ gap: 12 }}>
@@ -450,6 +506,14 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   ackRateLimited: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    padding: Spacing.two,
+    gap: Spacing.two,
+    backgroundColor: 'transparent',
+  },
+  disclosureGate: {
     alignSelf: 'stretch',
     borderWidth: 1,
     borderRadius: Spacing.three,

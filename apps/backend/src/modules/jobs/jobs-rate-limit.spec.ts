@@ -18,6 +18,7 @@ import { JobsService } from './jobs.service';
 describe('JobsController rate limits (expensive POST routes)', () => {
   let app: INestApplication;
   let dataDir: string;
+  let notifDataDir: string;
   const authHeader = {
     Authorization: `Bearer ${BANYONE_TEST_FIREBASE_ID_TOKEN}`,
   };
@@ -40,7 +41,9 @@ describe('JobsController rate limits (expensive POST routes)', () => {
 
   beforeEach(async () => {
     dataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-jobs-rl-'));
+    notifDataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-notif-rl-'));
     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
+    process.env.BANYONE_NOTIFICATIONS_DATA_DIR = notifDataDir;
     process.env.BANYONE_AUTH_VERIFIER = 'test';
     process.env.BANYONE_AUTH_TEST_UID = 'test-user-uid';
     process.env.BANYONE_THROTTLE_LIMIT = '1';
@@ -64,6 +67,13 @@ describe('JobsController rate limits (expensive POST routes)', () => {
       });
       delete process.env.BANYONE_JOBS_DATA_DIR;
     }
+    if (process.env.BANYONE_NOTIFICATIONS_DATA_DIR) {
+      rmSync(process.env.BANYONE_NOTIFICATIONS_DATA_DIR, {
+        recursive: true,
+        force: true,
+      });
+      delete process.env.BANYONE_NOTIFICATIONS_DATA_DIR;
+    }
     delete process.env.BANYONE_AUTH_VERIFIER;
     delete process.env.BANYONE_AUTH_TEST_UID;
     delete process.env.BANYONE_THROTTLE_LIMIT;
@@ -71,6 +81,12 @@ describe('JobsController rate limits (expensive POST routes)', () => {
   });
 
   it('POST /v1/generation-jobs returns 429 with canonical envelope when over limit', async () => {
+    await request(app.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(authHeader)
+      .send({ version: 'v1' })
+      .expect(200);
+
     await request(app.getHttpServer())
       .post('/v1/generation-jobs')
       .set(authHeader)

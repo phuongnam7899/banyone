@@ -1,5 +1,5 @@
 # generated: 2026-03-24T20:56:25+07:00
-# last_updated: 2026-03-30T00:00:00+07:00
+# last_updated: 2026-03-31T19:00:00+07:00
 # project: banyone
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-24T20:56:25+07:00
-last_updated: 2026-03-30T16:45:00+07:00
+last_updated: 2026-03-31T22:45:00+07:00
 project: banyone
 project_key: NOKEY
 tracking_system: file-system
@@ -50,18 +50,18 @@ development_status:
   1-5-real-time-status-timeline-with-retry-path: done
   1-6-preview-export-and-native-share: done
   1-7-persist-drafts-and-recover-interrupted-uploads: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
 
   epic-2: in-progress
   2-1-lightweight-user-identity-and-session-binding: done
   2-2-job-history-list-and-detail-views: done
   2-3-user-facing-rate-limit-notices: done
-  2-4-lifecycle-push-notifications: backlog
-  2-5-notification-preferences-management: backlog
-  epic-2-retrospective: optional
+  2-4-lifecycle-push-notifications: done
+  2-5-notification-preferences-management: done
+  epic-2-retrospective: done
 
-  epic-3: backlog
-  3-1-synthetic-media-disclosure-gate: backlog
+  epic-3: in-progress
+  3-1-synthetic-media-disclosure-gate: review
   3-2-policy-screening-at-job-acceptance: backlog
   3-3-in-app-reporting-for-generated-outputs: backlog
   3-4-moderation-queue-and-actions: backlog

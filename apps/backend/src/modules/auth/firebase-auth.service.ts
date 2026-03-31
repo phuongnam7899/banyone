@@ -3,6 +3,8 @@ import * as admin from 'firebase-admin';
 
 import { BANYONE_TEST_FIREBASE_ID_TOKEN } from '@banyone/contracts';
 
+import { getOrInitializeFirebaseAdminApp } from '../../infra/firebase-admin-app';
+
 export type VerifiedFirebaseUser = {
   uid: string;
 };
@@ -52,8 +54,7 @@ export class FirebaseAuthService {
     }
 
     try {
-      this.ensureFirebaseAdminInitialized();
-      const app = this.firebaseApp!;
+      const app = getOrInitializeFirebaseAdminApp();
       const decoded = await admin.auth(app).verifyIdToken(token);
       return { uid: decoded.uid };
     } catch {
@@ -61,29 +62,5 @@ export class FirebaseAuthService {
         code: 'INVALID_ID_TOKEN' as const,
       });
     }
-  }
-
-  private ensureFirebaseAdminInitialized(): void {
-    if (this.firebaseApp) return;
-
-    const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-    if (json && json.trim().length > 0) {
-      const creds = JSON.parse(json) as admin.ServiceAccount;
-      this.firebaseApp = admin.initializeApp({
-        credential: admin.credential.cert(creds),
-      });
-      return;
-    }
-
-    if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      this.firebaseApp = admin.initializeApp({
-        credential: admin.credential.applicationDefault(),
-      });
-      return;
-    }
-
-    throw new Error(
-      'Firebase Admin is not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS.',
-    );
   }
 }

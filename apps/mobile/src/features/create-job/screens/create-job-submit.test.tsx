@@ -217,5 +217,63 @@ describe('CreateJobScreen submit + ack', () => {
     const body1 = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
     expect(body0).toEqual(body1);
   });
+
+  it('shows disclosure gate, acknowledges, then proceeds with submit flow', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonFetchResponse(
+          {
+            data: null,
+            error: {
+              code: 'DISCLOSURE_REQUIRED',
+              message: 'Synthetic media disclosure acknowledgment is required.',
+              retryable: false,
+              traceId: 'trace-disclosure',
+              details: { currentVersion: 'v1' },
+            },
+          },
+          201,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonFetchResponse(
+          {
+            data: {
+              accepted: true,
+              currentVersion: 'v1',
+              acceptance: {
+                acceptedAt: new Date().toISOString(),
+                version: 'v1',
+              },
+            },
+            error: null,
+          },
+          200,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonFetchResponse({ data: { jobId: 'job-after-disclosure', status: 'queued' }, error: null }, 201),
+      );
+    (global as any).fetch = fetchMock;
+
+    render(<CreateJobScreen colorScheme="light" />);
+
+    fireEvent.press(screen.getByTestId('create-job.submit.button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('create-job.disclosure-gate.container')).toBeTruthy();
+    }, waitForOptions);
+
+    fireEvent.press(screen.getByTestId('create-job.disclosure-gate.acknowledge.button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('create-job.submit.ack.accepted')).toBeTruthy();
+    }, waitForOptions);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/v1/synthetic-media-disclosure/acknowledge');
+    expect(String(fetchMock.mock.calls[2][0])).toContain('/v1/generation-jobs');
+  });
 });
 

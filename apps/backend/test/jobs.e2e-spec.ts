@@ -5,10 +5,17 @@ import * as os from 'os';
 import * as path from 'path';
 import request from 'supertest';
 import { App } from 'supertest/types';
+import { BANYONE_TEST_FIREBASE_ID_TOKEN } from '@banyone/contracts';
+
 import { AppModule } from '../src/app.module';
 import { JobsService } from '../src/modules/jobs/jobs.service';
 
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+jest.setTimeout(20_000);
+
+const e2eAuthHeaders = {
+  Authorization: `Bearer ${BANYONE_TEST_FIREBASE_ID_TOKEN}`,
+};
 
 const validGenerationJobBody = () => ({
   video: {
@@ -29,10 +36,20 @@ const validGenerationJobBody = () => ({
 describe('JobsController (e2e)', () => {
   let app: INestApplication<App> | undefined;
   let dataDir: string;
+  let notifDataDir: string;
+  let disclosureDataDir: string;
 
   beforeEach(async () => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'banyone-jobs-e2e-'));
+    notifDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'banyone-notif-e2e-'));
+    disclosureDataDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'banyone-disclosure-e2e-'),
+    );
     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
+    process.env.BANYONE_NOTIFICATIONS_DATA_DIR = notifDataDir;
+    process.env.BANYONE_DISCLOSURE_DATA_DIR = disclosureDataDir;
+    process.env.BANYONE_AUTH_VERIFIER = 'test';
+    process.env.BANYONE_AUTH_TEST_UID = 'test-user-uid';
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -46,12 +63,111 @@ describe('JobsController (e2e)', () => {
     await app?.close();
     app = undefined;
     delete process.env.BANYONE_JOBS_DATA_DIR;
+    delete process.env.BANYONE_NOTIFICATIONS_DATA_DIR;
+    delete process.env.BANYONE_AUTH_VERIFIER;
+    delete process.env.BANYONE_AUTH_TEST_UID;
+    delete process.env.BANYONE_DISCLOSURE_DATA_DIR;
     fs.rmSync(dataDir, { recursive: true, force: true });
+    fs.rmSync(notifDataDir, { recursive: true, force: true });
+    fs.rmSync(disclosureDataDir, { recursive: true, force: true });
   });
 
-  it('POST /v1/generation-jobs returns 200 and queued envelope when inputs are valid', () => {
-    return request(app!.getHttpServer())
+  it('GET /v1/synthetic-media-disclosure returns initial not-accepted status for new users', async () => {
+    await request(app!.getHttpServer())
+      .get('/v1/synthetic-media-disclosure')
+      .set(e2eAuthHeaders)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          data: {
+            accepted: false,
+            currentVersion: 'v1',
+            acceptance: null,
+          },
+          error: null,
+        });
+      });
+  });
+
+  it('POST /v1/generation-jobs returns DISCLOSURE_REQUIRED when disclosure has not been acknowledged', async () => {
+    await request(app!.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
+      .set('x-banyone-idempotency-key', 'idem-disclosure-blocked')
+      .send(validGenerationJobBody())
+      .expect(201)
+      .expect((res) => {
+        expect(res.body.data).toBeNull();
+        expect(res.body.error).toMatchObject({
+          code: 'DISCLOSURE_REQUIRED',
+          message:
+            'Synthetic media disclosure acknowledgment is required before your first generation.',
+          retryable: false,
+          details: {
+            currentVersion: 'v1',
+            action: 'acknowledge_disclosure',
+          },
+        });
+        expect(res.body.error.traceId).toEqual(expect.any(String));
+      });
+  });
+
+  it('POST /v1/synthetic-media-disclosure/acknowledge validates version and records acceptance', async () => {
+    await request(app!.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(e2eAuthHeaders)
+      .send({ version: 'not-v1' })
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.data).toBeNull();
+        expect(res.body.error).toMatchObject({
+          code: 'DISCLOSURE_VERSION_INVALID',
+          message: 'Disclosure version must equal v1.',
+          retryable: false,
+        });
+        expect(res.body.error.traceId).toEqual(expect.any(String));
+      });
+
+    await request(app!.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(e2eAuthHeaders)
+      .send({ version: 'v1' })
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.error).toBeNull();
+        expect(res.body.data.accepted).toBe(true);
+        expect(res.body.data.currentVersion).toBe('v1');
+        expect(res.body.data.acceptance).toMatchObject({
+          version: 'v1',
+          acceptedAt: expect.any(String),
+        });
+      });
+
+    await request(app!.getHttpServer())
+      .get('/v1/synthetic-media-disclosure')
+      .set(e2eAuthHeaders)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.error).toBeNull();
+        expect(res.body.data.accepted).toBe(true);
+        expect(res.body.data.currentVersion).toBe('v1');
+        expect(res.body.data.acceptance).toMatchObject({
+          version: 'v1',
+          acceptedAt: expect.any(String),
+        });
+      });
+  });
+
+  it('POST /v1/generation-jobs returns 200 and queued envelope when inputs are valid and disclosure is acknowledged', async () => {
+    await request(app!.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(e2eAuthHeaders)
+      .send({ version: 'v1' })
+      .expect(200);
+
+    await request(app!.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
       .set('x-banyone-idempotency-key', 'idem-key-1')
       .send(validGenerationJobBody())
       .expect(201)
@@ -66,9 +182,16 @@ describe('JobsController (e2e)', () => {
       });
   });
 
-  it('POST /v1/generation-jobs returns error when idempotency header is missing', () => {
-    return request(app!.getHttpServer())
+  it('POST /v1/generation-jobs returns error when idempotency header is missing', async () => {
+    await request(app!.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(e2eAuthHeaders)
+      .send({ version: 'v1' })
+      .expect(200);
+
+    await request(app!.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
       .send(validGenerationJobBody())
       .expect(201)
       .expect((res) => {
@@ -82,12 +205,19 @@ describe('JobsController (e2e)', () => {
       });
   });
 
-  it('POST /v1/generation-jobs returns INPUT_INVALID when validation fails', () => {
+  it('POST /v1/generation-jobs returns INPUT_INVALID when validation fails', async () => {
+    await request(app!.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(e2eAuthHeaders)
+      .send({ version: 'v1' })
+      .expect(200);
+
     const body = validGenerationJobBody();
     body.video.durationSec = 999;
 
-    return request(app!.getHttpServer())
+    await request(app!.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
       .set('x-banyone-idempotency-key', 'idem-key-invalid-input')
       .send(body)
       .expect(201)
@@ -111,17 +241,25 @@ describe('JobsController (e2e)', () => {
   });
 
   it('POST /v1/generation-jobs is idempotent for the same key', async () => {
+    await request(app!.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(e2eAuthHeaders)
+      .send({ version: 'v1' })
+      .expect(200);
+
     const key = 'idem-key-repeat';
     const body = validGenerationJobBody();
 
     const first = await request(app!.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
       .set('x-banyone-idempotency-key', key)
       .send(body)
       .expect(201);
 
     const second = await request(app!.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
       .set('x-banyone-idempotency-key', key)
       .send(body)
       .expect(201);
@@ -144,6 +282,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(e2eAuthHeaders)
       .expect(200)
       .expect((res) => {
         expect(res.body.error).toBeNull();
@@ -167,6 +306,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}/preview`)
+      .set(e2eAuthHeaders)
       .expect(200)
       .expect((res) => {
         expect(res.body.error).toBeNull();
@@ -192,6 +332,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}/preview`)
+      .set(e2eAuthHeaders)
       .expect(200)
       .expect((res) => {
         expect(res.body.data).toBeNull();
@@ -218,6 +359,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .post(`/v1/generation-jobs/${jobId}/export`)
+      .set(e2eAuthHeaders)
       .expect(201)
       .expect((res) => {
         expect(res.body.error).toBeNull();
@@ -243,6 +385,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .post(`/v1/generation-jobs/${jobId}/export`)
+      .set(e2eAuthHeaders)
       .expect(201)
       .expect((res) => {
         expect(res.body.data).toBeNull();
@@ -270,6 +413,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}/preview`)
+      .set(e2eAuthHeaders)
       .expect(200)
       .expect((res) => {
         expect(res.body.data).toBeNull();
@@ -281,6 +425,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .post(`/v1/generation-jobs/${jobId}/export`)
+      .set(e2eAuthHeaders)
       .expect(201)
       .expect((res) => {
         expect(res.body.data).toBeNull();
@@ -292,6 +437,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(e2eAuthHeaders)
       .expect(200)
       .expect((res) => {
         expect(res.body.error).toBeNull();
@@ -313,6 +459,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(e2eAuthHeaders)
       .expect(200)
       .expect((res) => {
         expect(res.body.error).toBeNull();
@@ -334,6 +481,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(e2eAuthHeaders)
       .expect(200)
       .expect((res) => {
         expect(res.body.error).toBeNull();
@@ -346,13 +494,64 @@ describe('JobsController (e2e)', () => {
       });
   });
 
+  it('keeps in-app lifecycle status authoritative when all push lifecycle preferences are disabled', async () => {
+    await request(app!.getHttpServer())
+      .put('/v1/notification-preferences')
+      .set(e2eAuthHeaders)
+      .send({
+        lifecycle: {
+          jobQueued: false,
+          jobReady: false,
+          jobFailed: false,
+        },
+      })
+      .expect(200);
+
+    const jobsService = app!.get(JobsService);
+    const nowMs = Date.now();
+    const jobId = 'e2e-status-truth-2';
+    jobsService.__testSeedJob({
+      jobId,
+      status: 'processing',
+      processingAtMs: nowMs - 100_000,
+      updatedAtMs: nowMs - 100_000,
+    });
+
+    await request(app!.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}`)
+      .set(e2eAuthHeaders)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.error).toBeNull();
+        expect(['ready', 'failed']).toContain(res.body.data.status);
+      });
+
+    await request(app!.getHttpServer())
+      .get('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.error).toBeNull();
+        expect(
+          res.body.data.items.some((item: { jobId: string }) => item.jobId === jobId),
+        ).toBe(true);
+      });
+  });
+
   it('GET unknown route returns 404', () => {
     return request(app!.getHttpServer())
       .get('/v1/generation-jobs-unknown')
+      .set(e2eAuthHeaders)
       .expect(404);
   });
 
   it('POST /v1/generation-jobs returns 500 when service throws unexpectedly', async () => {
+    await request(app!.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(e2eAuthHeaders)
+      .send({ version: 'v1' })
+      .expect(200);
+
     const jobsService = app!.get(JobsService);
     const createSpy = jest
       .spyOn(jobsService, 'createGenerationJob')
@@ -360,6 +559,7 @@ describe('JobsController (e2e)', () => {
 
     await request(app!.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(e2eAuthHeaders)
       .set('x-banyone-idempotency-key', 'idem-key-service-throw')
       .send(validGenerationJobBody())
       .expect(500);

@@ -47,7 +47,17 @@ type SubmitRateLimitedAck = {
   traceId: string;
 };
 
-type SubmitAck = SubmitAcceptedAck | SubmitRejectedAck | SubmitRateLimitedAck;
+type SubmitDisclosureRequiredAck = {
+  type: "disclosure-required";
+  currentVersion: string;
+  traceId: string;
+};
+
+type SubmitAck =
+  | SubmitAcceptedAck
+  | SubmitRejectedAck
+  | SubmitRateLimitedAck
+  | SubmitDisclosureRequiredAck;
 
 export type UseJobSubmissionOptions = {
   initialIdempotencyKey?: string | null;
@@ -65,6 +75,8 @@ function resolveApiBaseUrl(): string {
 
 const API_BASE_URL = resolveApiBaseUrl();
 const ENDPOINT_PATH = "/v1/generation-jobs";
+const DISCLOSURE_ACK_PATH = "/v1/synthetic-media-disclosure/acknowledge";
+const DISCLOSURE_REQUIRED_ERROR_CODE = "DISCLOSURE_REQUIRED";
 
 function generateIdempotencyKey(): string {
   return `idem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
@@ -81,6 +93,7 @@ export function useJobSubmission(
   isSubmittingJob: boolean;
   ack: SubmitAck | null;
   submit: () => Promise<void>;
+  acknowledgeDisclosure: (version: string) => Promise<boolean>;
 } {
   const { getIdToken } = useBanyoneAuth();
   const { initialIdempotencyKey = null, onPendingIdempotencyKeyChange } = options;
@@ -203,6 +216,20 @@ export function useJobSubmission(
           });
           return;
         }
+        if (err.code === DISCLOSURE_REQUIRED_ERROR_CODE) {
+          const details = err.details as { currentVersion?: unknown } | undefined;
+          const currentVersion =
+            typeof details?.currentVersion === "string" &&
+            details.currentVersion.trim().length > 0
+              ? details.currentVersion.trim()
+              : "v1";
+          setAck({
+            type: "disclosure-required",
+            currentVersion,
+            traceId: err.traceId ?? "",
+          });
+          return;
+        }
 
         const details = err.details as JobValidationErrorDetails | undefined;
         const violations = details?.violations ?? [];
@@ -276,5 +303,25 @@ export function useJobSubmission(
     }
   }, [input, timeoutMs, clearIdempotency, onPendingIdempotencyKeyChange, getIdToken]);
 
-  return { isSubmittingJob, ack, submit };
+  const acknowledgeDisclosure = React.useCallback(
+    async (version: string): Promise<boolean> => {
+      const res = await banyoneAuthenticatedFetch(
+        `${API_BASE_URL}${DISCLOSURE_ACK_PATH}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ version }),
+        },
+        getIdToken,
+      );
+      const parsed = await parseBanyoneApiEnvelopeResponse(res);
+      if (!parsed.ok) return false;
+      return parsed.envelope.error === null;
+    },
+    [getIdToken],
+  );
+
+  return { isSubmittingJob, ack, submit, acknowledgeDisclosure };
 }
