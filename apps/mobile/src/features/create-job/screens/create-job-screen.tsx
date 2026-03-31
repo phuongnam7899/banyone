@@ -21,23 +21,64 @@ type Props = {
 
 export function CreateJobScreen({ colorScheme }: Props) {
   const colors = Colors[colorScheme];
-  const { state, pickVideo, pickImage, clearVideo, clearImage } = useJobInputSelection();
+  const {
+    state,
+    pickVideo,
+    pickImage,
+    clearVideo,
+    clearImage,
+    isRestoringDraft,
+    draftRestoreNotice,
+    dismissDraftNotice,
+    pendingIdempotencyKey,
+    setPendingIdempotencyKey,
+    clearPersistedDraftAfterAcceptedJob,
+  } = useJobInputSelection();
 
-  const { isSubmitting, ack, submit } = useJobSubmission({
-    video: {
-      uri: state.videoUri,
-      durationSec: state.videoDurationSec,
-      widthPx: state.videoWidthPx,
-      heightPx: state.videoHeightPx,
-      mimeType: state.videoMimeType,
-    },
-    image: {
-      uri: state.imageUri,
-      widthPx: state.imageWidthPx,
-      heightPx: state.imageHeightPx,
-      mimeType: state.imageMimeType,
-    },
-  });
+  const createGenerationJobBody = React.useMemo(
+    () => ({
+      video: {
+        uri: state.videoUri,
+        durationSec: state.videoDurationSec,
+        widthPx: state.videoWidthPx,
+        heightPx: state.videoHeightPx,
+        mimeType: state.videoMimeType,
+      },
+      image: {
+        uri: state.imageUri,
+        widthPx: state.imageWidthPx,
+        heightPx: state.imageHeightPx,
+        mimeType: state.imageMimeType,
+      },
+    }),
+    [
+      state.videoUri,
+      state.videoDurationSec,
+      state.videoWidthPx,
+      state.videoHeightPx,
+      state.videoMimeType,
+      state.imageUri,
+      state.imageWidthPx,
+      state.imageHeightPx,
+      state.imageMimeType,
+    ],
+  );
+
+  const jobSubmissionOptions = React.useMemo(
+    () => ({
+      initialIdempotencyKey: pendingIdempotencyKey,
+      onPendingIdempotencyKeyChange: setPendingIdempotencyKey,
+    }),
+    [pendingIdempotencyKey, setPendingIdempotencyKey],
+  );
+
+  const { isSubmittingJob, ack, submit } = useJobSubmission(createGenerationJobBody, jobSubmissionOptions);
+
+  React.useEffect(() => {
+    if (ack?.type === 'accepted') {
+      void clearPersistedDraftAfterAcceptedJob();
+    }
+  }, [ack, clearPersistedDraftAfterAcceptedJob]);
 
   const validation = React.useMemo(() => {
     return validateJobInputCompliance({
@@ -93,6 +134,59 @@ export function CreateJobScreen({ colorScheme }: Props) {
             </ThemedText>
           </View>
 
+          {isRestoringDraft ? (
+            <View
+              testID="create-job.draft-restoring.banner"
+              accessibilityRole="text"
+              style={[styles.draftBanner, { borderColor: colors.textSecondary }]}>
+              <ThemedText type="small" style={{ color: colors.textSecondary }}>
+                Restoring your draft…
+              </ThemedText>
+            </View>
+          ) : null}
+
+          {!isRestoringDraft && draftRestoreNotice === 'restored' ? (
+            <View
+              testID="create-job.draft-restored.banner"
+              accessibilityRole="text"
+              style={[styles.draftBanner, { borderColor: colors.primary }]}>
+              <ThemedText type="small" style={{ color: colors.text }}>
+                Draft restored — your previous selections were kept.
+              </ThemedText>
+              <Pressable
+                testID="create-job.draft-restored.dismiss"
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss draft restored message"
+                onPress={dismissDraftNotice}
+                style={styles.draftDismiss}>
+                <ThemedText type="small" style={{ color: colors.primary }}>
+                  Dismiss
+                </ThemedText>
+              </Pressable>
+            </View>
+          ) : null}
+
+          {!isRestoringDraft && draftRestoreNotice === 'corrupted' ? (
+            <View
+              testID="create-job.draft-corrupted.banner"
+              accessibilityRole="text"
+              style={[styles.draftBanner, { borderColor: colors.warningIcon }]}>
+              <ThemedText type="small" style={{ color: colors.text }}>
+                Your saved draft could not be loaded (files missing). Please pick media again.
+              </ThemedText>
+              <Pressable
+                testID="create-job.draft-corrupted.dismiss"
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss draft error message"
+                onPress={dismissDraftNotice}
+                style={styles.draftDismiss}>
+                <ThemedText type="small" style={{ color: colors.primary }}>
+                  OK
+                </ThemedText>
+              </Pressable>
+            </View>
+          ) : null}
+
           <ConstraintGuidance colorScheme={colorScheme} />
 
           <MediaSlotPicker
@@ -133,7 +227,7 @@ export function CreateJobScreen({ colorScheme }: Props) {
             testID="create-job.submit.button"
             accessibilityRole="button"
             accessibilityLabel="Submit"
-            disabled={isSubmitting}
+            disabled={isSubmittingJob || isRestoringDraft}
             onPress={() => {
               void submit();
             }}
@@ -141,12 +235,12 @@ export function CreateJobScreen({ colorScheme }: Props) {
               styles.submitButton,
               {
                 backgroundColor: colors.primary,
-                opacity: isSubmitting ? 0.6 : pressed ? 0.85 : 1,
+                opacity: isSubmittingJob || isRestoringDraft ? 0.6 : pressed ? 0.85 : 1,
                 borderColor: colors.primary,
               },
             ]}>
             <ThemedText type="small" style={{ color: colors.onPrimary }}>
-              {isSubmitting ? 'Submitting…' : 'Submit'}
+              {isRestoringDraft ? 'Loading draft…' : isSubmittingJob ? 'Submitting…' : 'Submit'}
             </ThemedText>
           </Pressable>
 
@@ -187,12 +281,12 @@ export function CreateJobScreen({ colorScheme }: Props) {
                   onPress={() => {
                     void submit();
                   }}
-                  disabled={isSubmitting || isRefreshingStatus}
+                  disabled={isSubmittingJob || isRefreshingStatus}
                   style={({ pressed }) => [
                     styles.retryButton,
                     {
                       backgroundColor: colors.primary,
-                      opacity: isSubmitting || isRefreshingStatus ? 0.6 : pressed ? 0.85 : 1,
+                      opacity: isSubmittingJob || isRefreshingStatus ? 0.6 : pressed ? 0.85 : 1,
                       borderColor: colors.primary,
                     },
                   ]}>
@@ -214,6 +308,28 @@ export function CreateJobScreen({ colorScheme }: Props) {
                   </ThemedText>
                 </View>
               ) : null}
+            </View>
+          ) : null}
+
+          {ack?.type === 'rate-limited' ? (
+            <View
+              testID="create-job.submit.ack.rate-limited"
+              style={[styles.ackRateLimited, { borderColor: colors.textSecondary }]}
+              accessibilityRole="alert"
+              accessibilityLabel="Rate limited">
+              <ThemedText type="small" style={{ color: colors.text }}>
+                Temporarily limited
+              </ThemedText>
+              <ThemedText
+                testID="create-job.submit.ack.rate-limited.message"
+                type="small"
+                accessibilityRole="text"
+                style={{ color: colors.textSecondary }}>
+                {ack.message}
+                {ack.retryAfterSec != null
+                  ? ` You can try again in about ${ack.retryAfterSec} seconds.`
+                  : ''}
+              </ThemedText>
             </View>
           ) : null}
 
@@ -289,6 +405,17 @@ const styles = StyleSheet.create({
   footerNote: {
     marginTop: Spacing.two,
   },
+  draftBanner: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    padding: Spacing.two,
+    gap: Spacing.two,
+  },
+  draftDismiss: {
+    alignSelf: 'flex-start',
+    paddingVertical: Spacing.one,
+  },
   submitButton: {
     alignSelf: 'stretch',
     borderWidth: 1,
@@ -320,6 +447,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: Spacing.three,
     padding: Spacing.two,
+    backgroundColor: 'transparent',
+  },
+  ackRateLimited: {
+    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderRadius: Spacing.three,
+    padding: Spacing.two,
+    gap: Spacing.two,
     backgroundColor: 'transparent',
   },
 });

@@ -4,7 +4,7 @@ import {
   durationSecFromAssetDuration,
   extensionFromFileNameOrUri,
   mimeTypeFromExtension,
-} from './use-job-input-selection';
+} from '@/features/create-job/utils/media-mime';
 
 describe('mime inference helpers', () => {
   it('maps .webp to image/webp (case-insensitive)', () => {

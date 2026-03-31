@@ -1,6 +1,15 @@
+import type { CreateJobDraftTelemetryEvent } from "@banyone/contracts";
+import {
+  API_RATE_LIMIT_ERROR_CODE,
+  isApiRateLimitDetails,
+} from "@banyone/contracts";
 import React from "react";
 import { Platform } from "react-native";
+
+import { useBanyoneAuth } from "@/features/auth/auth-context";
 import type { CreateGenerationJobRequestBody } from "@/features/create-job/types/create-generation-job";
+import { banyoneAuthenticatedFetch } from "@/infra/api-client/authenticated-fetch";
+import { parseBanyoneApiEnvelopeResponse } from "@/infra/api-client/parse-json-envelope";
 
 type ViolationDetail = {
   code: string;
@@ -31,18 +40,25 @@ type SubmitRejectedAck = {
   violations: ViolationDetail[];
 };
 
-type SubmitAck = SubmitAcceptedAck | SubmitRejectedAck;
+type SubmitRateLimitedAck = {
+  type: "rate-limited";
+  message: string;
+  retryAfterSec: number | null;
+  traceId: string;
+};
+
+type SubmitAck = SubmitAcceptedAck | SubmitRejectedAck | SubmitRateLimitedAck;
+
+export type UseJobSubmissionOptions = {
+  initialIdempotencyKey?: string | null;
+  onPendingIdempotencyKeyChange?: (key: string | null) => void;
+};
 
 function resolveApiBaseUrl(): string {
-  // Recommended override for real devices/emulators.
-  // Example: EXPO_PUBLIC_BACKEND_URL=http://10.0.2.2:3000
   const fromEnv = process.env.EXPO_PUBLIC_BACKEND_URL;
   if (typeof fromEnv === "string" && fromEnv.trim().length > 0)
     return fromEnv.trim();
 
-  // Sensible local dev defaults:
-  // - iOS simulator (and web) can reach localhost
-  // - Android emulator needs the special loopback alias
   if (Platform.OS === "android") return "http://10.0.2.2:3000";
   return "http://localhost:3000";
 }
@@ -51,20 +67,29 @@ const API_BASE_URL = resolveApiBaseUrl();
 const ENDPOINT_PATH = "/v1/generation-jobs";
 
 function generateIdempotencyKey(): string {
-  // No extra dependency: deterministically stable per attempt (we persist it in state/ref).
-  // Good enough for idempotency safety: uniqueness + immutability during the request.
   return `idem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
-export function useJobSubmission(input: CreateGenerationJobRequestBody): {
-  isSubmitting: boolean;
+function emitDraftTelemetry(event: CreateJobDraftTelemetryEvent): void {
+  console.info(`telemetry.${event.event}.v1`, event);
+}
+
+export function useJobSubmission(
+  input: CreateGenerationJobRequestBody,
+  options: UseJobSubmissionOptions = {},
+): {
+  isSubmittingJob: boolean;
   ack: SubmitAck | null;
   submit: () => Promise<void>;
 } {
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const { getIdToken } = useBanyoneAuth();
+  const { initialIdempotencyKey = null, onPendingIdempotencyKeyChange } = options;
+
+  const [isSubmittingJob, setIsSubmittingJob] = React.useState(false);
   const [ack, setAck] = React.useState<SubmitAck | null>(null);
 
   const idempotencyKeyRef = React.useRef<string | null>(null);
+  const hadNetworkFailureSinceLastTerminalAckRef = React.useRef(false);
   const isSubmittingRef = React.useRef(false);
   const abortControllerRef = React.useRef<AbortController | null>(null);
   const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -76,22 +101,45 @@ export function useJobSubmission(input: CreateGenerationJobRequestBody): {
     };
   }, []);
 
+  React.useEffect(() => {
+    if (initialIdempotencyKey) {
+      idempotencyKeyRef.current = initialIdempotencyKey;
+    }
+  }, [initialIdempotencyKey]);
+
   const timeoutMs = (() => {
     const raw = process.env.EXPO_PUBLIC_JOB_SUBMIT_TIMEOUT_MS;
     const n = raw ? Number(raw) : NaN;
     return Number.isFinite(n) && n > 0 ? n : 20000;
   })();
 
+  const clearIdempotency = React.useCallback(() => {
+    idempotencyKeyRef.current = null;
+    onPendingIdempotencyKeyChange?.(null);
+  }, [onPendingIdempotencyKeyChange]);
+
   const submit = React.useCallback(async () => {
     if (isSubmittingRef.current) return;
     isSubmittingRef.current = true;
 
     const startedAt = Date.now();
-    const idempotencyKey =
-      idempotencyKeyRef.current ?? generateIdempotencyKey();
-    idempotencyKeyRef.current = idempotencyKey;
 
-    setIsSubmitting(true);
+    const hadNetworkFailure = hadNetworkFailureSinceLastTerminalAckRef.current;
+    const existingKey = idempotencyKeyRef.current;
+    const idempotencyKey = existingKey ?? generateIdempotencyKey();
+    idempotencyKeyRef.current = idempotencyKey;
+    if (!existingKey) {
+      onPendingIdempotencyKeyChange?.(idempotencyKey);
+    } else if (hadNetworkFailure) {
+      emitDraftTelemetry({
+        event: "create_job_submit_retry_after_failure",
+        hasVideo: Boolean(input.video.uri),
+        hasImage: Boolean(input.image.uri),
+        hadPendingIdempotencyKey: true,
+      });
+    }
+
+    setIsSubmittingJob(true);
     setAck(null);
 
     const abortController = new AbortController();
@@ -99,51 +147,70 @@ export function useJobSubmission(input: CreateGenerationJobRequestBody): {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => abortController.abort(), timeoutMs);
 
+    const finishSubmittingUi = () => {
+      isSubmittingRef.current = false;
+      abortControllerRef.current = null;
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+      setIsSubmittingJob(false);
+    };
+
     try {
-      const res = await fetch(`${API_BASE_URL}${ENDPOINT_PATH}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-banyone-idempotency-key": idempotencyKey,
+      const res = await banyoneAuthenticatedFetch(
+        `${API_BASE_URL}${ENDPOINT_PATH}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-banyone-idempotency-key": idempotencyKey,
+          },
+          body: JSON.stringify(input),
+          signal: abortController.signal,
         },
-        body: JSON.stringify(input),
-        signal: abortController.signal,
-      });
+        getIdToken,
+      );
 
-      const json = (await res.json()) as
-        | { data: { jobId: string; status: "queued" }; error: null }
-        | {
-            data: null;
-            error: {
-              code: string;
-              retryable: boolean;
-              message: string;
-              traceId: string;
-              details?: JobValidationErrorDetails;
-            };
-          };
-
-      if (json.error === null) {
+      const parsed = await parseBanyoneApiEnvelopeResponse(res);
+      if (!parsed.ok) {
+        hadNetworkFailureSinceLastTerminalAckRef.current = true;
         setAck({
-          type: "accepted",
-          jobId: json.data.jobId,
-          status: json.data.status,
+          type: "rejected",
+          code: abortController.signal.aborted ? "NETWORK_TIMEOUT" : "NETWORK_ERROR",
+          traceId: "",
+          violations: [],
         });
+        return;
+      }
 
-        console.info("telemetry.jobs.generation.acknowledged.v1", {
-          outcome: "accepted",
-          jobId: json.data.jobId,
-          status: json.data.status,
-          clientAckLatencyMs: Date.now() - startedAt,
-        });
-      } else {
-        const details = json.error.details;
+      const envelope = parsed.envelope;
+
+      if (envelope.error !== null) {
+        hadNetworkFailureSinceLastTerminalAckRef.current = false;
+        clearIdempotency();
+        const err = envelope.error;
+
+        if (err.code === API_RATE_LIMIT_ERROR_CODE) {
+          const d = isApiRateLimitDetails(err.details) ? err.details : null;
+          setAck({
+            type: "rate-limited",
+            message: err.message,
+            retryAfterSec: d?.retryAfterSec ?? null,
+            traceId: err.traceId ?? "",
+          });
+          console.info("telemetry.jobs.generation.acknowledged.v1", {
+            outcome: "rate_limited",
+            clientAckLatencyMs: Date.now() - startedAt,
+          });
+          return;
+        }
+
+        const details = err.details as JobValidationErrorDetails | undefined;
         const violations = details?.violations ?? [];
 
         setAck({
           type: "rejected",
-          code: json.error.code ?? "UNKNOWN",
-          traceId: json.error.traceId ?? "",
+          code: err.code ?? "UNKNOWN",
+          traceId: err.traceId ?? "",
           details,
           violations,
         });
@@ -153,24 +220,61 @@ export function useJobSubmission(input: CreateGenerationJobRequestBody): {
           rejectionCodes: violations.map((v) => v.code),
           clientAckLatencyMs: Date.now() - startedAt,
         });
+        return;
       }
-    } catch {
-      setAck({
-        type: "rejected",
-        code: abortController.signal.aborted ? "NETWORK_TIMEOUT" : "NETWORK_ERROR",
-        traceId: "",
-        violations: [],
-      });
-    } finally {
-      // Clear only after acknowledgment has been parsed and rendered.
-      idempotencyKeyRef.current = null;
-      isSubmittingRef.current = false;
-      abortControllerRef.current = null;
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-      setIsSubmitting(false);
-    }
-  }, [input, timeoutMs]);
 
-  return { isSubmitting, ack, submit };
+      if (!res.ok) {
+        hadNetworkFailureSinceLastTerminalAckRef.current = false;
+        clearIdempotency();
+        setAck({
+          type: "rejected",
+          code: "UNEXPECTED_RESPONSE",
+          traceId: "",
+          violations: [],
+        });
+        return;
+      }
+
+      const data = envelope.data as { jobId: string; status: "queued" };
+      hadNetworkFailureSinceLastTerminalAckRef.current = false;
+      clearIdempotency();
+      setAck({
+        type: "accepted",
+        jobId: data.jobId,
+        status: data.status,
+      });
+
+      console.info("telemetry.jobs.generation.acknowledged.v1", {
+        outcome: "accepted",
+        jobId: data.jobId,
+        status: data.status,
+        clientAckLatencyMs: Date.now() - startedAt,
+      });
+    } catch (caught) {
+      if (
+        caught instanceof Error &&
+        caught.message.includes("missing Firebase ID token")
+      ) {
+        hadNetworkFailureSinceLastTerminalAckRef.current = false;
+        setAck({
+          type: "rejected",
+          code: "UNAUTHENTICATED",
+          traceId: "",
+          violations: [],
+        });
+      } else {
+        hadNetworkFailureSinceLastTerminalAckRef.current = true;
+        setAck({
+          type: "rejected",
+          code: abortController.signal.aborted ? "NETWORK_TIMEOUT" : "NETWORK_ERROR",
+          traceId: "",
+          violations: [],
+        });
+      }
+    } finally {
+      finishSubmittingUi();
+    }
+  }, [input, timeoutMs, clearIdempotency, onPendingIdempotencyKeyChange, getIdToken]);
+
+  return { isSubmittingJob, ack, submit };
 }

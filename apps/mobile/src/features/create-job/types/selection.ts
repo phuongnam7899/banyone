@@ -34,4 +34,5 @@ export type JobInputSelectionAction =
       mimeType: string | null;
     }
   | { type: 'clear_video' }
-  | { type: 'clear_image' };
+  | { type: 'clear_image' }
+  | { type: 'hydrate'; state: JobInputSelectionState };

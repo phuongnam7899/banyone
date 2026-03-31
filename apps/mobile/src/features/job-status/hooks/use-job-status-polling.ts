@@ -1,6 +1,9 @@
 import React from 'react';
 import { AppState, Platform } from 'react-native';
 
+import { useBanyoneAuth } from '@/features/auth/auth-context';
+import { banyoneAuthenticatedFetch } from '@/infra/api-client/authenticated-fetch';
+
 import type { JobFailureMetadata, JobStatusPayload } from '../types/job-status';
 
 const POLL_INTERVAL_MS = 500;
@@ -41,6 +44,7 @@ type BackendStatusResponse =
     };
 
 export function useJobStatusPolling(jobId: string | null, initialStatus?: JobStatusPayload | null) {
+  const { getIdToken } = useBanyoneAuth();
   const [status, setStatus] = React.useState<JobStatusPayload | null>(initialStatus ?? null);
   const [isRefreshingStatus, setIsRefreshingStatus] = React.useState(false);
   const [freshnessSamplesMs, setFreshnessSamplesMs] = React.useState<number[]>([]);
@@ -61,10 +65,14 @@ export function useJobStatusPolling(jobId: string | null, initialStatus?: JobSta
 
       const clientRequestedAt = Date.now();
       try {
-        const res = await fetch(`${API_BASE_URL}${ENDPOINT_PATH}/${jobId}`, {
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-        });
+        const res = await banyoneAuthenticatedFetch(
+          `${API_BASE_URL}${ENDPOINT_PATH}/${jobId}`,
+          {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+          },
+          getIdToken,
+        );
 
         const json = (await res.json()) as BackendStatusResponse;
         const clientReceivedAt = Date.now();
@@ -109,7 +117,7 @@ export function useJobStatusPolling(jobId: string | null, initialStatus?: JobSta
         }
       }
     },
-    [jobId],
+    [getIdToken, jobId],
   );
 
   React.useEffect(() => {

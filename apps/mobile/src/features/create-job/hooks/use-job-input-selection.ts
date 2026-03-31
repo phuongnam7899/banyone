@@ -1,80 +1,176 @@
+import type { CreateJobDraftSelectionV1, CreateJobDraftTelemetryEvent } from '@banyone/contracts';
 import * as ImagePicker from 'expo-image-picker';
-import { useCallback, useReducer } from 'react';
+import { getInfoAsync } from 'expo-file-system/legacy';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { AppState, Platform } from 'react-native';
 
 import {
   initialJobInputSelectionState,
   jobInputSelectionReducer,
 } from '@/features/create-job/hooks/job-input-selection-reducer';
+import type { JobInputSelectionState } from '@/features/create-job/types/selection';
+import {
+  copyPickedAssetToSandbox,
+  deleteIfManagedLocalFile,
+} from '@/features/create-job/services/copy-media-to-sandbox';
+import {
+  buildDraftPayload,
+  clearCreateJobDraft,
+  loadCreateJobDraft,
+  saveCreateJobDraft,
+} from '@/features/create-job/services/job-draft-storage';
+import {
+  durationSecFromAssetDuration,
+  extensionFromFileNameOrUri,
+  mimeTypeFromExtension,
+} from '@/features/create-job/utils/media-mime';
+
+function emitDraftTelemetry(event: CreateJobDraftTelemetryEvent): void {
+  console.info(`telemetry.${event.event}.v1`, event);
+}
 
 function labelFromAsset(asset: ImagePicker.ImagePickerAsset): string | null {
   return asset.fileName ?? asset.uri.split('/').pop() ?? null;
 }
 
-export function extensionFromFileNameOrUri(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const clean = value.split('?')[0];
-  const lastSegment = clean.split('/').pop() ?? '';
-  const dotIndex = lastSegment.lastIndexOf('.');
-  if (dotIndex === -1 || dotIndex === lastSegment.length - 1) return null;
-  return lastSegment.slice(dotIndex + 1).toLowerCase();
-}
-
-export function mimeTypeFromExtension(ext: string | null): string | null {
-  if (!ext) return null;
-
-  const normalized = ext.toLowerCase();
-
-  switch (normalized) {
-    // Common video types
-    case 'mp4':
-    case 'm4v':
-      return 'video/mp4';
-    case 'mov':
-      return 'video/quicktime';
-    case 'webm':
-      return 'video/webm';
-    case 'ogg':
-      return 'video/ogg';
-
-    // Common image types
-    case 'jpg':
-    case 'jpeg':
-      return 'image/jpeg';
-    case 'png':
-      return 'image/png';
-    case 'heic':
-    case 'heif':
-      return 'image/heic';
-    case 'webp':
-      return 'image/webp';
-    default:
-      return null;
-  }
-}
-
 function mimeTypeFromAsset(asset: ImagePicker.ImagePickerAsset): string | null {
-  // Expo may provide `mimeType`, but older/varied platforms can omit it.
   if (asset.mimeType) return asset.mimeType;
 
-  // Some expo builds expose `type` (sometimes as a MIME string, sometimes just "image"/"video").
   const maybeType = (asset as { type?: unknown }).type;
   if (typeof maybeType === 'string' && maybeType.includes('/')) return maybeType;
 
-  // Fallback: infer from extension in fileName/uri.
   const ext = extensionFromFileNameOrUri(asset.fileName ?? asset.uri);
   return mimeTypeFromExtension(ext);
 }
 
-export function durationSecFromAssetDuration(durationMs: number | null | undefined): number | null {
-  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs <= 0) {
-    return null;
-  }
-  // Expo image-picker reports video duration in milliseconds; validators use seconds.
-  return durationMs / 1000;
+/** Re-exported for tests and legacy imports; prefer `@/features/create-job/utils/media-mime`. */
+export {
+  durationSecFromAssetDuration,
+  extensionFromFileNameOrUri,
+  mimeTypeFromExtension,
+} from '@/features/create-job/utils/media-mime';
+
+function selectionToDraftShape(state: JobInputSelectionState): CreateJobDraftSelectionV1 {
+  return { ...state };
 }
+
+async function verifyLocalUrisExist(selection: CreateJobDraftSelectionV1): Promise<boolean> {
+  if (Platform.OS === 'web') return true;
+  const uris = [selection.videoUri, selection.imageUri].filter(Boolean) as string[];
+  for (const uri of uris) {
+    if (!uri.startsWith('file://')) continue;
+    try {
+      const info = await getInfoAsync(uri);
+      if (!info.exists) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+const DEBOUNCE_MS = 450;
 
 export function useJobInputSelection() {
   const [state, dispatch] = useReducer(jobInputSelectionReducer, initialJobInputSelectionState);
+  const [isRestoringDraft, setIsRestoringDraft] = useState(true);
+  const [draftRestoreNotice, setDraftRestoreNotice] = useState<'restored' | 'corrupted' | null>(null);
+  const [pendingIdempotencyKey, setPendingIdempotencyKey] = useState<string | null>(null);
+
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** After a successful job submit we clear storage; block auto-save until the user changes picks. */
+  const suppressDraftSaveRef = useRef(false);
+  const stateRef = useRef(state);
+  const pendingKeyRef = useRef(pendingIdempotencyKey);
+  stateRef.current = state;
+  pendingKeyRef.current = pendingIdempotencyKey;
+
+  const persistDraftNow = useCallback(async () => {
+    if (suppressDraftSaveRef.current) return;
+    const draft = buildDraftPayload({
+      selection: selectionToDraftShape(stateRef.current),
+      pendingIdempotencyKey: pendingKeyRef.current,
+    });
+    await saveCreateJobDraft(draft);
+    emitDraftTelemetry({
+      event: 'create_job_draft_saved',
+      hasVideo: Boolean(stateRef.current.videoUri),
+      hasImage: Boolean(stateRef.current.imageUri),
+      hadPendingIdempotencyKey: Boolean(pendingKeyRef.current),
+    });
+  }, []);
+
+  const dismissDraftNotice = useCallback(() => {
+    setDraftRestoreNotice(null);
+  }, []);
+
+  const clearPersistedDraftAfterAcceptedJob = useCallback(async () => {
+    await clearCreateJobDraft();
+    setPendingIdempotencyKey(null);
+    suppressDraftSaveRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const d = await loadCreateJobDraft();
+      if (cancelled) return;
+      if (!d) {
+        setIsRestoringDraft(false);
+        return;
+      }
+      const ok = await verifyLocalUrisExist(d.selection);
+      if (!ok) {
+        await clearCreateJobDraft();
+        if (!cancelled) {
+          setDraftRestoreNotice('corrupted');
+          emitDraftTelemetry({
+            event: 'create_job_draft_discarded',
+            hasVideo: false,
+            hasImage: false,
+          });
+        }
+        setIsRestoringDraft(false);
+        return;
+      }
+      dispatch({
+        type: 'hydrate',
+        state: { ...initialJobInputSelectionState, ...d.selection },
+      });
+      setPendingIdempotencyKey(d.pendingIdempotencyKey ?? null);
+      setDraftRestoreNotice('restored');
+      emitDraftTelemetry({
+        event: 'create_job_draft_loaded',
+        hasVideo: Boolean(d.selection.videoUri),
+        hasImage: Boolean(d.selection.imageUri),
+        hadPendingIdempotencyKey: Boolean(d.pendingIdempotencyKey),
+      });
+      setIsRestoringDraft(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isRestoringDraft) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      void persistDraftNow();
+    }, DEBOUNCE_MS);
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [state, pendingIdempotencyKey, isRestoringDraft, persistDraftNow]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'background' || next === 'inactive') {
+        if (!isRestoringDraft) void persistDraftNow();
+      }
+    });
+    return () => sub.remove();
+  }, [isRestoringDraft, persistDraftNow]);
 
   const ensureLibraryPermission = useCallback(async (): Promise<boolean> => {
     const existing = await ImagePicker.getMediaLibraryPermissionsAsync();
@@ -84,6 +180,7 @@ export function useJobInputSelection() {
   }, []);
 
   const pickVideo = useCallback(async (): Promise<void> => {
+    suppressDraftSaveRef.current = false;
     const ok = await ensureLibraryPermission();
     if (!ok) return;
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -93,9 +190,15 @@ export function useJobInputSelection() {
     });
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
+    await deleteIfManagedLocalFile(stateRef.current.videoUri);
+    const { uri } = await copyPickedAssetToSandbox({
+      sourceUri: asset.uri,
+      kind: 'video',
+      label: labelFromAsset(asset),
+    });
     dispatch({
       type: 'set_video',
-      uri: asset.uri,
+      uri,
       label: labelFromAsset(asset),
       durationSec: durationSecFromAssetDuration(asset.duration),
       widthPx: asset.width ?? null,
@@ -105,6 +208,7 @@ export function useJobInputSelection() {
   }, [ensureLibraryPermission]);
 
   const pickImage = useCallback(async (): Promise<void> => {
+    suppressDraftSaveRef.current = false;
     const ok = await ensureLibraryPermission();
     if (!ok) return;
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -114,9 +218,15 @@ export function useJobInputSelection() {
     });
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
+    await deleteIfManagedLocalFile(stateRef.current.imageUri);
+    const { uri } = await copyPickedAssetToSandbox({
+      sourceUri: asset.uri,
+      kind: 'image',
+      label: labelFromAsset(asset),
+    });
     dispatch({
       type: 'set_image',
-      uri: asset.uri,
+      uri,
       label: labelFromAsset(asset),
       widthPx: asset.width ?? null,
       heightPx: asset.height ?? null,
@@ -125,10 +235,14 @@ export function useJobInputSelection() {
   }, [ensureLibraryPermission]);
 
   const clearVideo = useCallback(() => {
+    suppressDraftSaveRef.current = false;
+    void deleteIfManagedLocalFile(stateRef.current.videoUri);
     dispatch({ type: 'clear_video' });
   }, []);
 
   const clearImage = useCallback(() => {
+    suppressDraftSaveRef.current = false;
+    void deleteIfManagedLocalFile(stateRef.current.imageUri);
     dispatch({ type: 'clear_image' });
   }, []);
 
@@ -138,5 +252,11 @@ export function useJobInputSelection() {
     pickImage,
     clearVideo,
     clearImage,
+    isRestoringDraft,
+    draftRestoreNotice,
+    dismissDraftNotice,
+    pendingIdempotencyKey,
+    setPendingIdempotencyKey,
+    clearPersistedDraftAfterAcceptedJob,
   };
 }

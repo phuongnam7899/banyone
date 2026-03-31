@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-argument -- supertest with Nest INestApplication#getHttpServer() */
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
@@ -5,8 +6,12 @@ import * as path from 'path';
 import * as os from 'os';
 import { mkdtempSync, rmSync } from 'fs';
 
-import { validateJobInputCompliance } from '@banyone/contracts';
+import {
+  BANYONE_TEST_FIREBASE_ID_TOKEN,
+  validateJobInputCompliance,
+} from '@banyone/contracts';
 
+import { ThrottlerEnvelopeExceptionFilter } from '../auth/throttler-envelope.filter';
 import { JobsModule } from './jobs.module';
 import { JobsService } from './jobs.service';
 import type {
@@ -17,6 +22,9 @@ import type {
 describe('JobsController', () => {
   let app: INestApplication;
   let dataDir: string;
+  const authHeader = {
+    Authorization: `Bearer ${BANYONE_TEST_FIREBASE_ID_TOKEN}`,
+  };
 
   type SuccessEnvelope = {
     data: {
@@ -59,15 +67,40 @@ describe('JobsController', () => {
     error: null;
   };
 
+  type Http401AuthBody = {
+    data: null;
+    error: {
+      code: string;
+      message: string;
+      retryable: boolean;
+      traceId: string;
+    };
+  };
+
+  type HistoryListEnvelope = {
+    data: {
+      items: Array<{
+        jobId: string;
+        status: 'queued' | 'processing' | 'ready' | 'failed';
+        updatedAt: string;
+      }>;
+    };
+    error: null;
+    meta?: Record<string, unknown>;
+  };
+
   beforeEach(async () => {
     dataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-jobs-'));
     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
+    process.env.BANYONE_AUTH_VERIFIER = 'test';
+    process.env.BANYONE_AUTH_TEST_UID = 'test-user-uid';
 
     const moduleRef = await Test.createTestingModule({
       imports: [JobsModule],
     }).compile();
 
     app = moduleRef.createNestApplication();
+    app.useGlobalFilters(new ThrottlerEnvelopeExceptionFilter());
     await app.init();
   });
 
@@ -80,6 +113,8 @@ describe('JobsController', () => {
       });
       delete process.env.BANYONE_JOBS_DATA_DIR;
     }
+    delete process.env.BANYONE_AUTH_VERIFIER;
+    delete process.env.BANYONE_AUTH_TEST_UID;
   });
 
   const validBody = {
@@ -98,9 +133,59 @@ describe('JobsController', () => {
     },
   };
 
+  it('POST /v1/generation-jobs returns 401 with contract-shaped body when Authorization is missing', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set('x-banyone-idempotency-key', 'idem-key-auth-missing')
+      .send(validBody)
+      .expect(401);
+
+    const authBody = res.body as Http401AuthBody;
+    expect(authBody.data).toBeNull();
+    expect(authBody.error.code).toBe('UNAUTHENTICATED');
+    expect(authBody.error.retryable).toBe(false);
+    expect(authBody.error.traceId).toEqual(expect.any(String));
+  });
+
+  it('POST /v1/generation-jobs returns 401 when Bearer token is invalid (test verifier)', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set('Authorization', 'Bearer invalid-token')
+      .set('x-banyone-idempotency-key', 'idem-key-auth-bad')
+      .send(validBody)
+      .expect(401);
+
+    const authBody = res.body as Http401AuthBody;
+    expect(authBody.data).toBeNull();
+    expect(authBody.error.code).toBe('INVALID_ID_TOKEN');
+    expect(authBody.error.retryable).toBe(false);
+  });
+
+  it('GET /v1/generation-jobs/:id/preview returns 401 when Authorization is missing', async () => {
+    const jobsService = app.get(JobsService);
+    const nowMs = Date.now();
+    jobsService.__testSeedJob({
+      jobId: 'job-auth-preview',
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/v1/generation-jobs/job-auth-preview/preview')
+      .expect(401);
+
+    const authBody = res.body as Http401AuthBody;
+    expect(authBody.data).toBeNull();
+    expect(authBody.error.code).toBe('UNAUTHENTICATED');
+    expect(authBody.error.retryable).toBe(false);
+    expect(authBody.error.traceId).toEqual(expect.any(String));
+  });
+
   it('POST /v1/generation-jobs returns success envelope + queued status', async () => {
     const res = await request(app.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(authHeader)
       .set('x-banyone-idempotency-key', 'idem-key-1')
       .send(validBody)
       .expect(201);
@@ -138,6 +223,7 @@ describe('JobsController', () => {
 
     const res = await request(app.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(authHeader)
       .set('x-banyone-idempotency-key', 'idem-key-2')
       .send(invalidBody)
       .expect(201);
@@ -162,12 +248,14 @@ describe('JobsController', () => {
 
     const first = await request(app.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(authHeader)
       .set('x-banyone-idempotency-key', key)
       .send(validBody)
       .expect(201);
 
     const second = await request(app.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(authHeader)
       .set('x-banyone-idempotency-key', key)
       .send(validBody)
       .expect(201);
@@ -184,6 +272,7 @@ describe('JobsController', () => {
 
     const first = await request(app.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(authHeader)
       .set('x-banyone-idempotency-key', key)
       .send(validBody)
       .expect(201);
@@ -198,11 +287,15 @@ describe('JobsController', () => {
     }).compile();
 
     const app2 = moduleRef2.createNestApplication();
+    app2.useGlobalFilters(new ThrottlerEnvelopeExceptionFilter());
     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
+    process.env.BANYONE_AUTH_VERIFIER = 'test';
+    process.env.BANYONE_AUTH_TEST_UID = 'test-user-uid';
     await app2.init();
 
     const second = await request(app2.getHttpServer())
       .post('/v1/generation-jobs')
+      .set(authHeader)
       .set('x-banyone-idempotency-key', key)
       .send(validBody)
       .expect(201);
@@ -210,6 +303,28 @@ describe('JobsController', () => {
     const secondBody = second.body as SuccessEnvelope;
     expect(secondBody.data.jobId).toBe(jobId);
     await app2.close();
+  });
+
+  it('does not share idempotency mappings across different authenticated users', async () => {
+    const sharedClientKey = 'idem-shared-client-key';
+
+    const userA = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set(authHeader)
+      .set('x-banyone-idempotency-key', sharedClientKey)
+      .send(validBody)
+      .expect(201);
+
+    const userB = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set('Authorization', 'Bearer test-valid-token-user-b')
+      .set('x-banyone-idempotency-key', sharedClientKey)
+      .send(validBody)
+      .expect(201);
+
+    const aBody = userA.body as SuccessEnvelope;
+    const bBody = userB.body as SuccessEnvelope;
+    expect(aBody.data.jobId).not.toBe(bBody.data.jobId);
   });
 
   it('GET /v1/generation-jobs/:id returns canonical success envelope with queued stage + ETA', async () => {
@@ -226,6 +341,7 @@ describe('JobsController', () => {
 
     const res = await request(app.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(authHeader)
       .expect(200);
 
     const body = res.body as GenerationJobStatusEnvelope;
@@ -235,6 +351,113 @@ describe('JobsController', () => {
     expect(body.data.status).toBe('queued');
     expect(body.data.updatedAt).toEqual(expect.any(String));
     expect(body.data.etaSeconds).toEqual(expect.any(Number));
+  });
+
+  it('GET /v1/generation-jobs returns 401 when Authorization is missing', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/generation-jobs')
+      .expect(401);
+
+    const authBody = res.body as Http401AuthBody;
+    expect(authBody.data).toBeNull();
+    expect(authBody.error.code).toBe('UNAUTHENTICATED');
+    expect(authBody.error.retryable).toBe(false);
+  });
+
+  it('GET /v1/generation-jobs/:id returns 401 when Authorization is missing', async () => {
+    const jobsService = app.get(JobsService);
+    jobsService.__testSeedJob({
+      jobId: 'job-detail-auth-required',
+      userId: 'test-user-uid',
+      status: 'queued',
+      queuedAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/v1/generation-jobs/job-detail-auth-required')
+      .expect(401);
+
+    const authBody = res.body as Http401AuthBody;
+    expect(authBody.data).toBeNull();
+    expect(authBody.error.code).toBe('UNAUTHENTICATED');
+    expect(authBody.error.retryable).toBe(false);
+    expect(authBody.error.traceId).toEqual(expect.any(String));
+  });
+
+  it('GET /v1/generation-jobs returns user-scoped list with contract-compatible fields', async () => {
+    const jobsService = app.get(JobsService);
+    const nowMs = Date.now();
+    jobsService.__testSeedJob({
+      jobId: 'history-a',
+      userId: 'test-user-uid',
+      status: 'processing',
+      processingAtMs: nowMs - 100,
+      updatedAtMs: nowMs - 100,
+    });
+    jobsService.__testSeedJob({
+      jobId: 'history-b',
+      userId: 'test-user-uid',
+      status: 'ready',
+      readyAtMs: nowMs,
+      updatedAtMs: nowMs,
+    });
+    jobsService.__testSeedJob({
+      jobId: 'history-other-user',
+      userId: 'other-user',
+      status: 'failed',
+      failedAtMs: nowMs,
+      updatedAtMs: nowMs,
+      failure: {
+        retryable: false,
+        reasonCode: 'PROCESSING_FAILED_NON_RETRYABLE',
+        nextAction: 'contact_support',
+        message: 'Processing failed and cannot be retried.',
+      },
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/v1/generation-jobs')
+      .set(authHeader)
+      .expect(200);
+
+    const body = res.body as HistoryListEnvelope;
+    expect(body.error).toBeNull();
+    if (body.error !== null) throw new Error('Expected success envelope');
+    expect(body.meta).toBeDefined();
+    expect(body.data.items).toHaveLength(2);
+    expect(body.data.items.map((item) => item.jobId)).toEqual([
+      'history-b',
+      'history-a',
+    ]);
+
+    const first = body.data.items[0];
+    expect(first.status).toBe('ready');
+    expect(first.updatedAt).toEqual(expect.any(String));
+  });
+
+  it('GET /v1/generation-jobs/:id returns JOB_NOT_FOUND for non-owned jobs', async () => {
+    const jobsService = app.get(JobsService);
+    jobsService.__testSeedJob({
+      jobId: 'job-other-owner',
+      userId: 'different-user',
+      status: 'queued',
+      queuedAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/v1/generation-jobs/job-other-owner')
+      .set(authHeader)
+      .expect(200);
+
+    const body = res.body as GenerationJobStatusEnvelope;
+    expect(body.data).toBeNull();
+    expect(body.error).toMatchObject({
+      code: 'JOB_NOT_FOUND',
+      retryable: false,
+      message: 'Generation job not found.',
+    });
   });
 
   it('GET /v1/generation-jobs/:id never skips queued -> ready in one call', async () => {
@@ -253,6 +476,7 @@ describe('JobsController', () => {
 
     const res = await request(app.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(authHeader)
       .expect(200);
 
     const body = res.body as GenerationJobStatusEnvelope;
@@ -274,6 +498,7 @@ describe('JobsController', () => {
 
     const res = await request(app.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(authHeader)
       .expect(200);
 
     const body = res.body as GenerationJobStatusEnvelope;
@@ -296,6 +521,7 @@ describe('JobsController', () => {
 
     const res = await request(app.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(authHeader)
       .expect(200);
 
     const body = res.body as GenerationJobStatusEnvelope;
@@ -311,6 +537,7 @@ describe('JobsController', () => {
   it('GET /v1/generation-jobs/:id returns JOB_NOT_FOUND envelope when missing', async () => {
     const res = await request(app.getHttpServer())
       .get(`/v1/generation-jobs/does-not-exist`)
+      .set(authHeader)
       .expect(200);
 
     const body = res.body as GenerationJobStatusEnvelope;
@@ -320,6 +547,7 @@ describe('JobsController', () => {
       retryable: false,
       message: 'Generation job not found.',
     });
+    if (body.error === null) throw new Error('expected error envelope');
     expect(body.error.traceId).toEqual(expect.any(String));
   });
 
@@ -336,6 +564,7 @@ describe('JobsController', () => {
 
     const res = await request(app.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}/preview`)
+      .set(authHeader)
       .expect(200);
 
     const body = res.body as PreviewSuccessEnvelope;
@@ -359,6 +588,7 @@ describe('JobsController', () => {
 
     const res = await request(app.getHttpServer())
       .post(`/v1/generation-jobs/${jobId}/export`)
+      .set(authHeader)
       .expect(201);
 
     const body = res.body as ExportSuccessEnvelope;
@@ -387,6 +617,7 @@ describe('JobsController', () => {
 
     const previewRes = await request(app.getHttpServer())
       .get('/v1/generation-jobs/job-preview-1/preview')
+      .set(authHeader)
       .expect(200);
     const previewBody = previewRes.body as ErrorEnvelope;
     expect(previewBody.data).toBeNull();
@@ -397,6 +628,7 @@ describe('JobsController', () => {
 
     const exportRes = await request(app.getHttpServer())
       .post('/v1/generation-jobs/job-export-2/export')
+      .set(authHeader)
       .expect(201);
     const exportBody = exportRes.body as ErrorEnvelope;
     expect(exportBody.data).toBeNull();
@@ -419,13 +651,16 @@ describe('JobsController', () => {
 
     await request(app.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}/preview`)
+      .set(authHeader)
       .expect(200);
     await request(app.getHttpServer())
       .post(`/v1/generation-jobs/${jobId}/export`)
+      .set(authHeader)
       .expect(201);
 
     const statusRes = await request(app.getHttpServer())
       .get(`/v1/generation-jobs/${jobId}`)
+      .set(authHeader)
       .expect(200);
     const statusBody = statusRes.body as GenerationJobStatusEnvelope;
     if (statusBody.error !== null) throw new Error('Expected success envelope');
@@ -443,6 +678,7 @@ describe('JobsController', () => {
 
     await request(app.getHttpServer())
       .get('/v1/generation-jobs/metric-1')
+      .set(authHeader)
       .expect(200);
 
     const report = jobsService.getLifecycleInvariantReport();

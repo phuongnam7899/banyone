@@ -1,6 +1,20 @@
-import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import type { CreateGenerationJobRequestBody } from './dto/create-generation-job.request';
+import { CurrentUser } from '../auth/current-user.decorator';
+import { BanyoneUserThrottlerGuard } from '../auth/banyone-user-throttler.guard';
+import { FirebaseAuthGuard } from '../auth/firebase-auth.guard';
+import type { BanyoneAuthUser } from '../auth/banyone-user.types';
 import type {
+  GenerationJobHistoryListEnvelope,
   GenerationJobEnvelope,
   GenerationJobExportEnvelope,
   GenerationJobPreviewEnvelope,
@@ -8,6 +22,8 @@ import type {
 } from './jobs.types';
 import { JobsService } from './jobs.service';
 
+@UseGuards(FirebaseAuthGuard, BanyoneUserThrottlerGuard)
+@SkipThrottle({ default: true })
 @Controller('v1')
 export class JobsController {
   constructor(private readonly jobsService: JobsService) {}
@@ -21,11 +37,14 @@ export class JobsController {
    * - 4xx: { data: null, error: { code, message, retryable, details?, traceId } }
    */
   @Post('generation-jobs')
+  @SkipThrottle({ default: false })
   async createGenerationJob(
+    @CurrentUser() user: BanyoneAuthUser,
     @Body() body: CreateGenerationJobRequestBody,
     @Headers('x-banyone-idempotency-key') idempotencyKey?: string,
   ): Promise<GenerationJobEnvelope> {
     return this.jobsService.createGenerationJob({
+      userId: user.uid,
       body,
       idempotencyKeyHeader: idempotencyKey,
     });
@@ -39,24 +58,44 @@ export class JobsController {
    * Error:
    * - { data: null, error: { code, message, retryable, details?, traceId }, meta? }
    */
+  @Get('generation-jobs')
+  listGenerationJobs(
+    @CurrentUser() user: BanyoneAuthUser,
+  ): GenerationJobHistoryListEnvelope {
+    return this.jobsService.listGenerationJobs({ userId: user.uid });
+  }
+
   @Get('generation-jobs/:id')
   getGenerationJobStatus(
+    @CurrentUser() user: BanyoneAuthUser,
     @Param('id') id: string,
-  ): Promise<GenerationJobStatusEnvelope> {
-    return this.jobsService.getGenerationJobStatus({ jobId: id });
+  ): GenerationJobStatusEnvelope {
+    return this.jobsService.getGenerationJobStatus({
+      userId: user.uid,
+      jobId: id,
+    });
   }
 
   @Get('generation-jobs/:id/preview')
   getGenerationJobPreview(
+    @CurrentUser() user: BanyoneAuthUser,
     @Param('id') id: string,
-  ): Promise<GenerationJobPreviewEnvelope> {
-    return this.jobsService.getGenerationJobPreview({ jobId: id });
+  ): GenerationJobPreviewEnvelope {
+    return this.jobsService.getGenerationJobPreview({
+      userId: user.uid,
+      jobId: id,
+    });
   }
 
   @Post('generation-jobs/:id/export')
+  @SkipThrottle({ default: false })
   createGenerationJobExport(
+    @CurrentUser() user: BanyoneAuthUser,
     @Param('id') id: string,
-  ): Promise<GenerationJobExportEnvelope> {
-    return this.jobsService.createGenerationJobExport({ jobId: id });
+  ): GenerationJobExportEnvelope {
+    return this.jobsService.createGenerationJobExport({
+      userId: user.uid,
+      jobId: id,
+    });
   }
 }

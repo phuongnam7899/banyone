@@ -26,12 +26,18 @@ jest.mock('@/features/create-job/hooks/use-job-input-selection', () => ({
     pickImage: jest.fn(),
     clearVideo: jest.fn(),
     clearImage: jest.fn(),
+    isRestoringDraft: false,
+    draftRestoreNotice: null,
+    dismissDraftNotice: jest.fn(),
+    pendingIdempotencyKey: null,
+    setPendingIdempotencyKey: jest.fn(),
+    clearPersistedDraftAfterAcceptedJob: jest.fn(),
   }),
 }));
 
 jest.mock('@/features/create-job/hooks/use-job-submission', () => ({
   useJobSubmission: () => ({
-    isSubmitting: false,
+    isSubmittingJob: false,
     ack: { type: 'accepted', jobId: 'job-1', status: 'queued' },
     submit: mockSubmit,
   }),

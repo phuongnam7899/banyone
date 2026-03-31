@@ -1,6 +1,6 @@
 # Story 1.6: Preview, Export, and Native Share
 
-Status: review
+Status: done
 
 ## Story
 

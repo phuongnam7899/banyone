@@ -12,3 +12,17 @@ export type PreviewExportEvent = {
   jobId: string;
   code?: string;
 };
+
+export type CreateJobDraftTelemetryEventName =
+  | 'create_job_draft_saved'
+  | 'create_job_draft_loaded'
+  | 'create_job_draft_discarded'
+  | 'create_job_submit_retry_after_failure';
+
+export type CreateJobDraftTelemetryEvent = {
+  event: CreateJobDraftTelemetryEventName;
+  /** Avoid logging raw paths in production; use booleans or hashed ids only. */
+  hasVideo: boolean;
+  hasImage: boolean;
+  hadPendingIdempotencyKey?: boolean;
+};

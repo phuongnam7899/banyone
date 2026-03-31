@@ -8,6 +8,15 @@ import { PreviewExportPanel } from './preview-export-panel';
 jest.mock('expo-media-library');
 jest.mock('expo-sharing');
 
+function jsonFetchResponse(body: unknown, status = 200) {
+  const serialized = JSON.stringify(body);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => serialized,
+  };
+}
+
 const readyJobStatus = {
   jobId: 'job-9',
   status: 'ready' as const,
@@ -16,6 +25,7 @@ const readyJobStatus = {
 
 describe('PreviewExportPanel', () => {
   beforeEach(() => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
     jest.clearAllMocks();
     (MediaLibrary.requestPermissionsAsync as jest.Mock).mockResolvedValue({
@@ -29,8 +39,8 @@ describe('PreviewExportPanel', () => {
   it('renders preview ready state and enables one-tap export', async () => {
     (global as any).fetch = jest
       .fn()
-      .mockResolvedValueOnce({
-        json: async () => ({
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: {
             jobId: 'job-9',
             status: 'ready',
@@ -40,9 +50,9 @@ describe('PreviewExportPanel', () => {
           },
           error: null,
         }),
-      })
-      .mockResolvedValueOnce({
-        json: async () => ({
+      )
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: {
             jobId: 'job-9',
             status: 'ready',
@@ -51,8 +61,8 @@ describe('PreviewExportPanel', () => {
             mimeType: 'video/mp4',
           },
           error: null,
-        }),
-      });
+        }, 201),
+      );
 
     render(<PreviewExportPanel jobStatus={readyJobStatus} colorScheme="light" />);
 
@@ -76,8 +86,8 @@ describe('PreviewExportPanel', () => {
   it('shows deterministic failed-preview state and retry action', async () => {
     (global as any).fetch = jest
       .fn()
-      .mockResolvedValueOnce({
-        json: async () => ({
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: null,
           error: {
             code: 'PREVIEW_LOAD_FAILED',
@@ -86,9 +96,9 @@ describe('PreviewExportPanel', () => {
             traceId: 'trace-1',
           },
         }),
-      })
-      .mockResolvedValueOnce({
-        json: async () => ({
+      )
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: {
             jobId: 'job-9',
             status: 'ready',
@@ -98,7 +108,7 @@ describe('PreviewExportPanel', () => {
           },
           error: null,
         }),
-      });
+      );
 
     render(<PreviewExportPanel jobStatus={readyJobStatus} colorScheme="light" />);
 
@@ -114,11 +124,38 @@ describe('PreviewExportPanel', () => {
     });
   });
 
-  it('keeps ready state and shows actionable code when export fails', async () => {
+  it('surfaces rate limit copy when preview returns 429 with envelope (not NETWORK_ERROR)', async () => {
+    (global as any).fetch = jest.fn().mockResolvedValueOnce(
+      jsonFetchResponse(
+        {
+          data: null,
+          error: {
+            code: 'RATE_LIMITED',
+            message: 'Slow down — wait a moment.',
+            retryable: true,
+            traceId: 'rl-1',
+            details: { scope: 'account', retryAfterSec: 42 },
+          },
+        },
+        429,
+      ),
+    );
+
+    render(<PreviewExportPanel jobStatus={readyJobStatus} colorScheme="light" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('job-result.retry.button')).toBeTruthy();
+      expect(String(screen.getByTestId('job-result.error.code').props.children)).toContain('RATE_LIMITED');
+    });
+
+    expect(screen.getByText('Slow down — wait a moment.')).toBeTruthy();
+  });
+
+  it('surfaces rate limit on export when POST returns 429 with envelope (not NETWORK_ERROR)', async () => {
     (global as any).fetch = jest
       .fn()
-      .mockResolvedValueOnce({
-        json: async () => ({
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: {
             jobId: 'job-9',
             status: 'ready',
@@ -128,9 +165,57 @@ describe('PreviewExportPanel', () => {
           },
           error: null,
         }),
-      })
-      .mockResolvedValueOnce({
-        json: async () => ({
+      )
+      .mockResolvedValueOnce(
+        jsonFetchResponse(
+          {
+            data: null,
+            error: {
+              code: 'RATE_LIMITED',
+              message: 'Export throttled — try again shortly.',
+              retryable: true,
+              traceId: 'rl-export',
+              details: { scope: 'account', retryAfterSec: 30 },
+            },
+          },
+          429,
+        ),
+      );
+
+    render(<PreviewExportPanel jobStatus={readyJobStatus} colorScheme="light" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('job-result.preview.video')).toBeTruthy();
+    });
+
+    fireEvent.press(screen.getByTestId('job-result.export.button'));
+
+    await waitFor(() => {
+      expect(String(screen.getByTestId('job-result.error.code').props.children)).toContain('RATE_LIMITED');
+    });
+
+    expect(screen.getByText('Export throttled — try again shortly.')).toBeTruthy();
+    expect(screen.getByTestId('job-result.preview.video')).toBeTruthy();
+    expect(String(screen.getByTestId('job-result.error.code').props.children)).not.toContain('NETWORK_ERROR');
+  });
+
+  it('keeps ready state and shows actionable code when export fails', async () => {
+    (global as any).fetch = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
+          data: {
+            jobId: 'job-9',
+            status: 'ready',
+            updatedAt: new Date().toISOString(),
+            previewUri: 'https://cdn.banyone.local/generated/job-9.mp4',
+            mimeType: 'video/mp4',
+          },
+          error: null,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: null,
           error: {
             code: 'EXPORT_PREPARATION_FAILED',
@@ -138,8 +223,8 @@ describe('PreviewExportPanel', () => {
             retryable: true,
             traceId: 'trace-export-1',
           },
-        }),
-      });
+        }, 201),
+      );
 
     render(<PreviewExportPanel jobStatus={readyJobStatus} colorScheme="light" />);
 
@@ -161,8 +246,8 @@ describe('PreviewExportPanel', () => {
   it('shows deterministic share-unavailable guidance after successful export', async () => {
     (global as any).fetch = jest
       .fn()
-      .mockResolvedValueOnce({
-        json: async () => ({
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: {
             jobId: 'job-9',
             status: 'ready',
@@ -172,9 +257,9 @@ describe('PreviewExportPanel', () => {
           },
           error: null,
         }),
-      })
-      .mockResolvedValueOnce({
-        json: async () => ({
+      )
+      .mockResolvedValueOnce(
+        jsonFetchResponse({
           data: {
             jobId: 'job-9',
             status: 'ready',
@@ -183,8 +268,8 @@ describe('PreviewExportPanel', () => {
             mimeType: 'video/mp4',
           },
           error: null,
-        }),
-      });
+        }, 201),
+      );
 
     render(<PreviewExportPanel jobStatus={readyJobStatus} colorScheme="light" />);
 

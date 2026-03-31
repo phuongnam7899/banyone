@@ -1,6 +1,7 @@
 /** @type {import('jest').Config} */
 module.exports = {
   preset: 'jest-expo',
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   testMatch: ['**/*.test.ts', '**/*.test.tsx'],
   moduleNameMapper: {
     '^@/global\\.css$': '<rootDir>/jest/cssMock.js',

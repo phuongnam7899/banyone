@@ -9,6 +9,8 @@ import type { CreateGenerationJobRequestBody } from './dto/create-generation-job
 import type {
   GenerationJobEnvelope,
   GenerationJobExportEnvelope,
+  GenerationJobHistoryDetailEnvelope,
+  GenerationJobHistoryListEnvelope,
   GenerationJobInputViolationDetail,
   GenerationJobPreviewEnvelope,
   GenerationJobStatus,
@@ -18,14 +20,21 @@ import type {
   GenerationJobStatusPayload,
 } from './jobs.types';
 
+/** Separates Firebase uid from client idempotency key in persisted storage. */
+const IDEMPOTENCY_SCOPING_SEP = '\u001f';
+
+/** Jobs and idempotency rows migrated from pre–Story 2.1 stores. */
+const LEGACY_UNSCOPED_USER_ID = '__legacy_unscoped__';
+
 type PersistedJobsStore = {
-  version: 1 | 2;
+  version: 3;
   idempotency: Record<string, { jobId: string; status: GenerationJobStatus }>;
   jobs: Record<string, PersistedJobRecord>;
 };
 
 type PersistedJobRecord = {
   jobId: string;
+  userId: string;
   status: GenerationJobStatus;
 
   // Internal timestamps stored as unix epoch milliseconds.
@@ -42,6 +51,10 @@ type PersistedJobRecord = {
     message: string;
   };
 };
+
+function scopedIdempotencyKey(userId: string, clientKey: string): string {
+  return `${userId}${IDEMPOTENCY_SCOPING_SEP}${clientKey}`;
+}
 
 @Injectable()
 export class JobsService {
@@ -74,69 +87,161 @@ export class JobsService {
 
   private loadStore(): PersistedJobsStore {
     if (!existsSync(this.storeFilePath)) {
-      return { version: 2, idempotency: {}, jobs: {} };
+      return { version: 3, idempotency: {}, jobs: {} };
     }
     try {
       const raw = readFileSync(this.storeFilePath, { encoding: 'utf-8' });
-      const parsed = JSON.parse(raw) as PersistedJobsStore;
+      const parsedUnknown = JSON.parse(raw) as unknown;
+      return this.normalizePersistedJobsStore(parsedUnknown);
+    } catch {
+      return { version: 3, idempotency: {}, jobs: {} };
+    }
+  }
 
-      if (!parsed?.idempotency || !parsed.jobs) {
-        return { version: 2, idempotency: {}, jobs: {} };
-      }
+  private normalizePersistedJobsStore(
+    parsedUnknown: unknown,
+  ): PersistedJobsStore {
+    if (
+      typeof parsedUnknown !== 'object' ||
+      parsedUnknown === null ||
+      !('idempotency' in parsedUnknown) ||
+      !('jobs' in parsedUnknown)
+    ) {
+      return { version: 3, idempotency: {}, jobs: {} };
+    }
 
-      // If an older store version exists, migrate it to the current schema.
-      if (parsed.version === 1) {
-        const nowMs = Date.now();
-        const migratedJobs: Record<string, PersistedJobRecord> = {};
+    const parsed = parsedUnknown as {
+      version?: unknown;
+      idempotency: Record<
+        string,
+        { jobId: string; status: GenerationJobStatus }
+      >;
+      jobs: Record<string, unknown>;
+    };
 
-        const jobsUnknown = parsed.jobs as unknown as Record<string, unknown>;
-        for (const [jobKey, job] of Object.entries(jobsUnknown)) {
-          const maybeJob = job as { jobId?: unknown; status?: unknown };
-          const jobId =
-            typeof maybeJob.jobId === 'string' &&
-            maybeJob.jobId.trim().length > 0
-              ? maybeJob.jobId
-              : jobKey;
+    let version: number =
+      typeof parsed.version === 'number' ? parsed.version : 2;
 
-          const statusUnknown = maybeJob.status;
-          if (
-            statusUnknown !== 'queued' &&
-            statusUnknown !== 'processing' &&
-            statusUnknown !== 'ready' &&
-            statusUnknown !== 'failed'
-          ) {
-            continue;
-          }
+    let idempotency = { ...parsed.idempotency };
+    let jobs: Record<string, PersistedJobRecord> = {};
 
-          const status = statusUnknown;
+    if (version === 1) {
+      const nowMs = Date.now();
+      const migratedJobs: Record<string, PersistedJobRecord> = {};
+      const jobsUnknown = parsed.jobs;
 
-          migratedJobs[jobKey] = {
-            jobId,
-            status,
-            updatedAtMs: nowMs,
-            queuedAtMs: status === 'queued' ? nowMs : undefined,
-            processingAtMs: status === 'processing' ? nowMs : undefined,
-            readyAtMs: status === 'ready' ? nowMs : undefined,
-            failedAtMs: status === 'failed' ? nowMs : undefined,
-          };
+      for (const [jobKey, job] of Object.entries(jobsUnknown)) {
+        const maybeJob = job as { jobId?: unknown; status?: unknown };
+        const jobId =
+          typeof maybeJob.jobId === 'string' && maybeJob.jobId.trim().length > 0
+            ? maybeJob.jobId
+            : jobKey;
+
+        const statusUnknown = maybeJob.status;
+        if (
+          statusUnknown !== 'queued' &&
+          statusUnknown !== 'processing' &&
+          statusUnknown !== 'ready' &&
+          statusUnknown !== 'failed'
+        ) {
+          continue;
         }
 
-        return {
-          version: 2,
-          idempotency: parsed.idempotency,
-          jobs: migratedJobs,
+        const status = statusUnknown;
+
+        migratedJobs[jobKey] = {
+          jobId,
+          userId: LEGACY_UNSCOPED_USER_ID,
+          status,
+          updatedAtMs: nowMs,
+          queuedAtMs: status === 'queued' ? nowMs : undefined,
+          processingAtMs: status === 'processing' ? nowMs : undefined,
+          readyAtMs: status === 'ready' ? nowMs : undefined,
+          failedAtMs: status === 'failed' ? nowMs : undefined,
+        };
+      }
+      jobs = migratedJobs;
+      const scopedIdem: Record<
+        string,
+        { jobId: string; status: GenerationJobStatus }
+      > = {};
+      for (const [k, v] of Object.entries(idempotency)) {
+        scopedIdem[scopedIdempotencyKey(LEGACY_UNSCOPED_USER_ID, k)] = v;
+      }
+      idempotency = scopedIdem;
+      version = 3;
+    } else {
+      for (const [jobKey, jobUnknown] of Object.entries(parsed.jobs)) {
+        const j = jobUnknown as Record<string, unknown>;
+        if (
+          typeof j.jobId !== 'string' ||
+          (j.status !== 'queued' &&
+            j.status !== 'processing' &&
+            j.status !== 'ready' &&
+            j.status !== 'failed')
+        ) {
+          continue;
+        }
+        const uid =
+          typeof j.userId === 'string' && j.userId.length > 0
+            ? j.userId
+            : LEGACY_UNSCOPED_USER_ID;
+        jobs[jobKey] = {
+          jobId: j.jobId,
+          userId: uid,
+          status: j.status as GenerationJobStatus,
+          updatedAtMs:
+            typeof j.updatedAtMs === 'number' ? j.updatedAtMs : Date.now(),
+          ...(typeof j.queuedAtMs === 'number'
+            ? { queuedAtMs: j.queuedAtMs }
+            : {}),
+          ...(typeof j.processingAtMs === 'number'
+            ? { processingAtMs: j.processingAtMs }
+            : {}),
+          ...(typeof j.readyAtMs === 'number'
+            ? { readyAtMs: j.readyAtMs }
+            : {}),
+          ...(typeof j.failedAtMs === 'number'
+            ? { failedAtMs: j.failedAtMs }
+            : {}),
+          ...(typeof j.failure === 'object' &&
+          j.failure !== null &&
+          'retryable' in j.failure &&
+          'reasonCode' in j.failure &&
+          'nextAction' in j.failure &&
+          'message' in j.failure
+            ? {
+                failure: j.failure as PersistedJobRecord['failure'],
+              }
+            : {}),
         };
       }
 
-      if (parsed.version !== 2) {
-        return { version: 2, idempotency: {}, jobs: {} };
+      if (version === 2) {
+        const scopedIdem: Record<
+          string,
+          { jobId: string; status: GenerationJobStatus }
+        > = {};
+        for (const [k, v] of Object.entries(idempotency)) {
+          if (k.includes(IDEMPOTENCY_SCOPING_SEP)) {
+            scopedIdem[k] = v;
+          } else {
+            scopedIdem[scopedIdempotencyKey(LEGACY_UNSCOPED_USER_ID, k)] = v;
+          }
+        }
+        idempotency = scopedIdem;
+        for (const job of Object.values(jobs)) {
+          if (!job.userId) job.userId = LEGACY_UNSCOPED_USER_ID;
+        }
+        version = 3;
       }
-      return parsed;
-    } catch {
-      // If the store is corrupted, fall back to an empty store.
-      // (A production system would add migrations + integrity checks.)
-      return { version: 2, idempotency: {}, jobs: {} };
     }
+
+    if (version !== 3) {
+      return { version: 3, idempotency: {}, jobs: {} };
+    }
+
+    return { version: 3, idempotency, jobs };
   }
 
   private saveStore(): void {
@@ -191,6 +296,7 @@ export class JobsService {
   }
 
   async createGenerationJob(params: {
+    userId: string;
     body: CreateGenerationJobRequestBody;
     idempotencyKeyHeader?: string;
   }): Promise<GenerationJobEnvelope> {
@@ -208,7 +314,7 @@ export class JobsService {
       return envelope;
     }
 
-    const key = normalized.value;
+    const key = scopedIdempotencyKey(params.userId, normalized.value);
     const existingPromise = this.inFlight.get(key);
     if (existingPromise) {
       const envelope = await existingPromise;
@@ -217,7 +323,11 @@ export class JobsService {
     }
 
     const promise = Promise.resolve(
-      this.handleCreateForKey({ key, body: params.body }),
+      this.handleCreateForKey({
+        userId: params.userId,
+        key,
+        body: params.body,
+      }),
     ).finally(() => {
       this.inFlight.delete(key);
     });
@@ -256,10 +366,11 @@ export class JobsService {
   }
 
   getGenerationJobStatus(params: {
+    userId: string;
     jobId: string;
   }): GenerationJobStatusEnvelope {
     const job = this.store.jobs[params.jobId];
-    if (!job) {
+    if (!job || job.userId !== params.userId) {
       // Keep canonical envelope shape, even for not-found.
       return this.makeErrorEnvelope({
         code: 'JOB_NOT_FOUND',
@@ -297,11 +408,67 @@ export class JobsService {
     };
   }
 
+  listGenerationJobs(params: {
+    userId: string;
+  }): GenerationJobHistoryListEnvelope {
+    const items = Object.values(this.store.jobs)
+      .filter((job) => job.userId === params.userId)
+      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
+      .map((job) => ({
+        jobId: job.jobId,
+        status: job.status,
+        updatedAt: new Date(job.updatedAtMs).toISOString(),
+      }));
+
+    return {
+      data: { items },
+      error: null,
+      meta: { total: items.length },
+    };
+  }
+
+  getGenerationJobHistoryDetail(params: {
+    userId: string;
+    jobId: string;
+  }): GenerationJobHistoryDetailEnvelope {
+    const job = this.store.jobs[params.jobId];
+    if (!job || job.userId !== params.userId) {
+      return this.makeErrorEnvelope({
+        code: 'JOB_NOT_FOUND',
+        message: 'Generation job not found.',
+        retryable: false,
+      });
+    }
+
+    return {
+      data: {
+        jobId: job.jobId,
+        status: job.status,
+        updatedAt: new Date(job.updatedAtMs).toISOString(),
+        ...(typeof job.queuedAtMs === 'number'
+          ? { queuedAt: new Date(job.queuedAtMs).toISOString() }
+          : {}),
+        ...(typeof job.processingAtMs === 'number'
+          ? { processingAt: new Date(job.processingAtMs).toISOString() }
+          : {}),
+        ...(typeof job.readyAtMs === 'number'
+          ? { readyAt: new Date(job.readyAtMs).toISOString() }
+          : {}),
+        ...(typeof job.failedAtMs === 'number'
+          ? { failedAt: new Date(job.failedAtMs).toISOString() }
+          : {}),
+        ...(job.failure ? { failure: job.failure } : {}),
+      },
+      error: null,
+    };
+  }
+
   getGenerationJobPreview(params: {
+    userId: string;
     jobId: string;
   }): GenerationJobPreviewEnvelope {
     const job = this.store.jobs[params.jobId];
-    if (!job) {
+    if (!job || job.userId !== params.userId) {
       return this.makeErrorEnvelope({
         code: 'JOB_NOT_FOUND',
         message: 'Generation job not found.',
@@ -338,10 +505,11 @@ export class JobsService {
   }
 
   createGenerationJobExport(params: {
+    userId: string;
     jobId: string;
   }): GenerationJobExportEnvelope {
     const job = this.store.jobs[params.jobId];
-    if (!job) {
+    if (!job || job.userId !== params.userId) {
       return this.makeErrorEnvelope({
         code: 'JOB_NOT_FOUND',
         message: 'Generation job not found.',
@@ -393,6 +561,7 @@ export class JobsService {
    */
   public __testSeedJob(params: {
     jobId: string;
+    userId?: string;
     status: GenerationJobStatus;
     updatedAtMs?: number;
     queuedAtMs?: number;
@@ -407,6 +576,8 @@ export class JobsService {
     };
   }): void {
     const updatedAtMs = params.updatedAtMs ?? Date.now();
+    const userId =
+      params.userId ?? process.env.BANYONE_AUTH_TEST_UID ?? 'test-user-uid';
 
     const queuedAtMs =
       params.status === 'queued'
@@ -427,6 +598,7 @@ export class JobsService {
 
     this.store.jobs[params.jobId] = {
       jobId: params.jobId,
+      userId,
       status: params.status,
       updatedAtMs,
       queuedAtMs,
@@ -615,6 +787,7 @@ export class JobsService {
   }
 
   private handleCreateForKey(params: {
+    userId: string;
     key: string;
     body: CreateGenerationJobRequestBody;
   }): GenerationJobEnvelope {
@@ -686,6 +859,7 @@ export class JobsService {
 
     this.store.jobs[jobId] = {
       jobId,
+      userId: params.userId,
       status,
       updatedAtMs: nowMs,
       queuedAtMs: nowMs,

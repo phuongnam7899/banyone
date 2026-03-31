@@ -64,6 +64,8 @@ export function jobInputSelectionReducer(
         imageHeightPx: null,
         imageMimeType: null,
       };
+    case 'hydrate':
+      return action.state;
     default:
       return state;
   }

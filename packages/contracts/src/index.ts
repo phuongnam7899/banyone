@@ -31,4 +31,46 @@ export type {
   VideoValidationInput,
 } from "./input-validation.js";
 
-export type { PreviewExportEvent, PreviewExportEventName } from './telemetry.js';
+export type {
+  CreateJobDraftTelemetryEvent,
+  CreateJobDraftTelemetryEventName,
+  PreviewExportEvent,
+  PreviewExportEventName,
+} from './telemetry.js';
+
+export {
+  CREATE_JOB_DRAFT_SCHEMA_VERSION,
+  isCreateJobDraftV1,
+} from './create-job-draft.js';
+
+export type { CreateJobDraftSelectionV1, CreateJobDraftV1 } from './create-job-draft.js';
+
+export {
+  BANYONE_TEST_FIREBASE_ID_TOKEN,
+} from './api-auth.js';
+
+export type {
+  ApiAuthErrorCode,
+  ApiAuthErrorEnvelope,
+} from './api-auth.js';
+
+export type {
+  GenerationJobFailureMetadata as HistoryJobFailureMetadata,
+  GenerationJobHistoryDetailEnvelope,
+  GenerationJobHistoryDetailPayload,
+  GenerationJobHistoryListEnvelope,
+  GenerationJobHistoryListItem,
+  GenerationJobHistoryListPayload,
+  GenerationJobStatus as HistoryJobStatus,
+} from './api-history.js';
+
+export {
+  API_RATE_LIMIT_ERROR_CODE,
+  isApiRateLimitDetails,
+} from './api-rate-limit.js';
+
+export type {
+  ApiRateLimitErrorCode,
+  ApiRateLimitErrorDetails,
+  ApiRateLimitScope,
+} from './api-rate-limit.js';

@@ -3,11 +3,15 @@ import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
 import type { PreviewExportEvent } from '@banyone/contracts';
 
+import { useBanyoneAuth } from '@/features/auth/auth-context';
+
 import { createReadyExport, fetchReadyPreview } from '../services/preview-export-api';
 import type { PreviewPayload, PreviewStage } from '../types/preview-export';
 
 function mapErrorCopy(code: string): string {
   switch (code) {
+    case 'RATE_LIMITED':
+      return 'This action is temporarily limited. Please wait and try again.';
     case 'PREVIEW_LOAD_FAILED':
       return 'Preview is temporarily unavailable. Retry to load it again.';
     case 'EXPORT_PREPARATION_FAILED':
@@ -38,6 +42,7 @@ function emitPreviewExportEvent(event: PreviewExportEvent): void {
 }
 
 export function usePreviewExport(jobId: string | null, status: 'queued' | 'processing' | 'ready' | 'failed' | null) {
+  const { getIdToken } = useBanyoneAuth();
   const [state, setState] = React.useState<HookState>({
     stage: 'loading',
     preview: null,
@@ -53,7 +58,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
     setState((prev) => ({ ...prev, stage: 'loading', errorCode: null, errorMessage: null }));
 
     try {
-      const result = await fetchReadyPreview(jobId);
+      const result = await fetchReadyPreview(jobId, getIdToken);
       if (result.error === null) {
         setState((prev) => ({
           ...prev,
@@ -70,7 +75,10 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
         ...prev,
         stage: 'failed-preview',
         errorCode: result.error.code,
-        errorMessage: mapErrorCopy(result.error.code),
+        errorMessage:
+          result.error.code === 'RATE_LIMITED'
+            ? result.error.message
+            : mapErrorCopy(result.error.code),
       }));
     } catch {
       setState((prev) => ({
@@ -80,7 +88,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
         errorMessage: mapErrorCopy('NETWORK_ERROR'),
       }));
     }
-  }, [jobId, status]);
+  }, [getIdToken, jobId, status]);
 
   React.useEffect(() => {
     if (!jobId || status !== 'ready') return;
@@ -93,13 +101,16 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
     emitPreviewExportEvent({ event: 'export_started', jobId });
 
     try {
-      const result = await createReadyExport(jobId);
+      const result = await createReadyExport(jobId, getIdToken);
       if (result.error !== null) {
         setState((prev) => ({
           ...prev,
           isExporting: false,
           errorCode: result.error.code,
-          errorMessage: mapErrorCopy(result.error.code),
+          errorMessage:
+            result.error.code === 'RATE_LIMITED'
+              ? result.error.message
+              : mapErrorCopy(result.error.code),
         }));
         emitPreviewExportEvent({ event: 'export_failed', jobId, code: result.error.code });
         return;
@@ -146,7 +157,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
       }));
       emitPreviewExportEvent({ event: 'export_failed', jobId, code: 'NETWORK_ERROR' });
     }
-  }, [jobId]);
+  }, [getIdToken, jobId]);
 
   const shareExported = React.useCallback(async () => {
     if (!jobId || !state.exportedFileUri) return;
