@@ -6,9 +6,19 @@ import { HistoryDetailScreen } from './history-detail-screen';
 import { HistoryListScreen } from './history-list-screen';
 
 const mockPush = jest.fn();
+const mockUsePreviewExport = jest.fn();
 
 jest.mock('expo-router', () => ({
-  useRouter: () => ({ push: mockPush }),
+  useRouter: () => ({
+    push: mockPush,
+    back: jest.fn(),
+    replace: jest.fn(),
+    canGoBack: jest.fn(() => true),
+  }),
+}));
+
+jest.mock('@/features/preview-export/hooks/use-preview-export', () => ({
+  usePreviewExport: (...args: unknown[]) => mockUsePreviewExport(...args),
 }));
 
 const waitForOptions = { timeout: 15_000 };
@@ -19,6 +29,13 @@ describe('Story 2.2 history list/detail authenticated API workflow', () => {
     jest.useRealTimers();
     jest.clearAllMocks();
     mockPush.mockReset();
+    mockUsePreviewExport.mockReset();
+    mockUsePreviewExport.mockReturnValue({
+      stage: 'loading',
+      preview: null,
+      isExporting: false,
+      exportToLibrary: jest.fn(),
+    });
   });
 
   it('list load sends GET /v1/generation-jobs with Bearer token', async () => {
@@ -53,7 +70,7 @@ describe('Story 2.2 history list/detail authenticated API workflow', () => {
     expect(headers.get('Authorization')).toBe(`Bearer ${BANYONE_TEST_FIREBASE_ID_TOKEN}`);
   });
 
-  it('navigating open detail uses route with job id', async () => {
+  it('history list shows preview/download actions for each item', async () => {
     const fetchMock = jest.fn().mockResolvedValue({
       json: async () => ({
         data: {
@@ -73,11 +90,10 @@ describe('Story 2.2 history list/detail authenticated API workflow', () => {
     render(<HistoryListScreen />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('history.list.open-detail.button.job-route-1')).toBeTruthy();
+      expect(screen.getByTestId('history.list.preview.button.job-route-1')).toBeTruthy();
     }, waitForOptions);
 
-    fireEvent.press(screen.getByTestId('history.list.open-detail.button.job-route-1'));
-    expect(mockPush).toHaveBeenCalledWith('/history-detail/job-route-1');
+    expect(screen.getByTestId('history.list.download.button.job-route-1')).toBeTruthy();
   });
 
   it('detail load sends GET /v1/generation-jobs/:id with Bearer token', async () => {

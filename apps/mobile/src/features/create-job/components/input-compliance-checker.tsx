@@ -132,6 +132,35 @@ export function InputComplianceChecker({ colorScheme, video, image, onPickVideo,
   );
 }
 
+export function InputComplianceSlotFeedback({
+  slot,
+  colorScheme,
+  result,
+  onPick,
+}: {
+  slot: 'video' | 'image';
+  colorScheme: 'light' | 'dark';
+  result: SlotValidationResult;
+  onPick: () => void;
+}) {
+  return (
+    <View testID={slotTestID(slot)} style={styles.slotFeedback}>
+      <StageLabel status={result.status} slot={slot} colorScheme={colorScheme} />
+      {result.status === 'invalid-with-fix'
+        ? result.violations.map((v, idx) => (
+            <ViolationBlock
+              key={`${v.code}.${idx}`}
+              slot={slot}
+              violation={v}
+              onFix={onPick}
+              colorScheme={colorScheme}
+            />
+          ))
+        : null}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   card: {
     alignSelf: 'stretch',
@@ -155,6 +184,9 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.half,
     borderRadius: Spacing.two,
     alignSelf: 'flex-start',
+  },
+  slotFeedback: {
+    gap: Spacing.half,
   },
 });
 

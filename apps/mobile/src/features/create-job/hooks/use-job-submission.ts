@@ -1,7 +1,12 @@
-import type { CreateJobDraftTelemetryEvent } from "@banyone/contracts";
 import {
+  ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
   API_RATE_LIMIT_ERROR_CODE,
+  DEFAULT_QUALITY_TIER,
+  INSUFFICIENT_CREDIT_ERROR_CODE,
+  POLICY_VIOLATION_ERROR_CODE,
   isApiRateLimitDetails,
+  isInsufficientCreditDetails,
+  isJobPolicyViolationDetails,
 } from "@banyone/contracts";
 import React from "react";
 import { Platform } from "react-native";
@@ -10,6 +15,7 @@ import { useBanyoneAuth } from "@/features/auth/auth-context";
 import type { CreateGenerationJobRequestBody } from "@/features/create-job/types/create-generation-job";
 import { banyoneAuthenticatedFetch } from "@/infra/api-client/authenticated-fetch";
 import { parseBanyoneApiEnvelopeResponse } from "@/infra/api-client/parse-json-envelope";
+import { emitCreateJobDraftTelemetry, emitFunnelTelemetry } from "@/infra/telemetry";
 
 type ViolationDetail = {
   code: string;
@@ -53,11 +59,38 @@ type SubmitDisclosureRequiredAck = {
   traceId: string;
 };
 
+type SubmitPolicyBlockedAck = {
+  type: "policy-blocked";
+  policyCode: string;
+  message: string;
+  guidance: string;
+  traceId: string;
+};
+
+type SubmitAbuseRestrictedAck = {
+  type: "abuse-restricted";
+  message: string;
+  traceId: string;
+};
+
+type SubmitInsufficientCreditAck = {
+  type: "insufficient-credit";
+  message: string;
+  traceId: string;
+  balance: number;
+  required: number;
+  shortfall: number;
+  videoCreditPerSecond: number;
+};
+
 type SubmitAck =
   | SubmitAcceptedAck
   | SubmitRejectedAck
   | SubmitRateLimitedAck
-  | SubmitDisclosureRequiredAck;
+  | SubmitDisclosureRequiredAck
+  | SubmitPolicyBlockedAck
+  | SubmitAbuseRestrictedAck
+  | SubmitInsufficientCreditAck;
 
 export type UseJobSubmissionOptions = {
   initialIdempotencyKey?: string | null;
@@ -75,15 +108,55 @@ function resolveApiBaseUrl(): string {
 
 const API_BASE_URL = resolveApiBaseUrl();
 const ENDPOINT_PATH = "/v1/generation-jobs";
+const ASSET_UPLOAD_PATH = "/v1/generation-jobs/assets";
 const DISCLOSURE_ACK_PATH = "/v1/synthetic-media-disclosure/acknowledge";
+const MEDIA_UPLOAD_ENABLED =
+  process.env.EXPO_PUBLIC_ENABLE_MEDIA_UPLOAD === "true";
 const DISCLOSURE_REQUIRED_ERROR_CODE = "DISCLOSURE_REQUIRED";
+
+const POLICY_BLOCKED_GUIDANCE: Record<string, string> = {
+  STORAGE_URI_BLOCKED:
+    "Choose a different video or image file. If this keeps happening, contact support and share the trace ID below.",
+};
+
+function policyGuidanceForCode(policyCode: string): string {
+  return POLICY_BLOCKED_GUIDANCE[policyCode] ?? POLICY_BLOCKED_GUIDANCE.STORAGE_URI_BLOCKED;
+}
 
 function generateIdempotencyKey(): string {
   return `idem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
-function emitDraftTelemetry(event: CreateJobDraftTelemetryEvent): void {
-  console.info(`telemetry.${event.event}.v1`, event);
+/** React Native native multipart file shape (not supported in browser FormData). */
+function appendNativeUploadFilePart(
+  formData: FormData,
+  uri: string,
+  fileName: string,
+  mimeType: string,
+): void {
+  formData.append("file", {
+    uri,
+    name: fileName,
+    type: mimeType,
+  } as unknown as Blob);
+}
+
+/** Web: read picker URI (e.g. blob:) into a Blob so Multer receives real bytes. */
+async function appendWebUploadFilePart(
+  formData: FormData,
+  uri: string,
+  fileName: string,
+  mimeType: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch(uri, { signal });
+  if (!res.ok) {
+    throw new Error("ASSET_UPLOAD_FAILED");
+  }
+  const raw = await res.blob();
+  const body =
+    mimeType.trim().length > 0 ? new Blob([raw], { type: mimeType }) : raw;
+  formData.append("file", body, fileName);
 }
 
 export function useJobSubmission(
@@ -135,8 +208,6 @@ export function useJobSubmission(
     if (isSubmittingRef.current) return;
     isSubmittingRef.current = true;
 
-    const startedAt = Date.now();
-
     const hadNetworkFailure = hadNetworkFailureSinceLastTerminalAckRef.current;
     const existingKey = idempotencyKeyRef.current;
     const idempotencyKey = existingKey ?? generateIdempotencyKey();
@@ -144,8 +215,9 @@ export function useJobSubmission(
     if (!existingKey) {
       onPendingIdempotencyKeyChange?.(idempotencyKey);
     } else if (hadNetworkFailure) {
-      emitDraftTelemetry({
+      emitCreateJobDraftTelemetry({
         event: "create_job_submit_retry_after_failure",
+        funnelStage: "submit_result",
         hasVideo: Boolean(input.video.uri),
         hasImage: Boolean(input.image.uri),
         hadPendingIdempotencyKey: true,
@@ -169,6 +241,71 @@ export function useJobSubmission(
     };
 
     try {
+      const uploadIfNeeded = async (
+        slot: "video" | "image",
+        uri: string | null,
+        mimeType: string | null,
+      ): Promise<string | null> => {
+        if (!uri) return null;
+        if (/^https?:\/\//i.test(uri)) return uri;
+        if (!MEDIA_UPLOAD_ENABLED) return uri;
+        const fileName = uri.split("/").pop() ?? `${slot}-${Date.now()}`;
+        const resolvedMime =
+          mimeType?.trim() && mimeType.includes("/")
+            ? mimeType.trim()
+            : slot === "video"
+              ? "video/mp4"
+              : "image/jpeg";
+        const formData = new FormData();
+        formData.append("slot", slot);
+        if (Platform.OS === "web") {
+          await appendWebUploadFilePart(
+            formData,
+            uri,
+            fileName,
+            resolvedMime,
+            abortController.signal,
+          );
+        } else {
+          appendNativeUploadFilePart(formData, uri, fileName, resolvedMime);
+        }
+        const uploadRes = await banyoneAuthenticatedFetch(
+          `${API_BASE_URL}${ASSET_UPLOAD_PATH}`,
+          {
+            method: "POST",
+            body: formData,
+            signal: abortController.signal,
+          },
+          getIdToken,
+        );
+        const uploaded = await parseBanyoneApiEnvelopeResponse(uploadRes);
+        if (!uploaded.ok || uploaded.envelope.error !== null || !uploadRes.ok) {
+          throw new Error("ASSET_UPLOAD_FAILED");
+        }
+        const payload = uploaded.envelope.data as { assetUrl: string };
+        return payload.assetUrl;
+      };
+      const uploadedVideoUri = await uploadIfNeeded(
+        "video",
+        input.video.uri,
+        input.video.mimeType,
+      );
+      const uploadedImageUri = await uploadIfNeeded(
+        "image",
+        input.image.uri,
+        input.image.mimeType,
+      );
+      const requestBody: CreateGenerationJobRequestBody = {
+        ...input,
+        video: {
+          ...input.video,
+          uri: uploadedVideoUri,
+        },
+        image: {
+          ...input.image,
+          uri: uploadedImageUri,
+        },
+      };
       const res = await banyoneAuthenticatedFetch(
         `${API_BASE_URL}${ENDPOINT_PATH}`,
         {
@@ -177,7 +314,7 @@ export function useJobSubmission(
             "Content-Type": "application/json",
             "x-banyone-idempotency-key": idempotencyKey,
           },
-          body: JSON.stringify(input),
+          body: JSON.stringify(requestBody),
           signal: abortController.signal,
         },
         getIdToken,
@@ -210,9 +347,10 @@ export function useJobSubmission(
             retryAfterSec: d?.retryAfterSec ?? null,
             traceId: err.traceId ?? "",
           });
-          console.info("telemetry.jobs.generation.acknowledged.v1", {
-            outcome: "rate_limited",
-            clientAckLatencyMs: Date.now() - startedAt,
+          emitFunnelTelemetry({
+            funnelStage: "submit_result",
+            submissionOutcomeClass: "rate_limited",
+            eventName: "submit_result",
           });
           return;
         }
@@ -228,6 +366,69 @@ export function useJobSubmission(
             currentVersion,
             traceId: err.traceId ?? "",
           });
+          emitFunnelTelemetry({
+            funnelStage: "disclosure_presented",
+            submissionOutcomeClass: "disclosure_required",
+            eventName: "disclosure_presented",
+          });
+          return;
+        }
+
+        if (err.code === POLICY_VIOLATION_ERROR_CODE) {
+          const details = isJobPolicyViolationDetails(err.details) ? err.details : null;
+          const policyCode = details?.policyCode ?? "STORAGE_URI_BLOCKED";
+          setAck({
+            type: "policy-blocked",
+            policyCode,
+            message: err.message,
+            guidance: policyGuidanceForCode(policyCode),
+            traceId: err.traceId ?? "",
+          });
+          emitFunnelTelemetry({
+            funnelStage: "submit_result",
+            submissionOutcomeClass: "policy_blocked",
+            eventName: "submit_result",
+            code: policyCode,
+          });
+          return;
+        }
+
+        if (err.code === ABUSE_RESTRICTION_ACTIVE_ERROR_CODE) {
+          setAck({
+            type: "abuse-restricted",
+            message: err.message,
+            traceId: err.traceId ?? "",
+          });
+          emitFunnelTelemetry({
+            funnelStage: "submit_result",
+            submissionOutcomeClass: "abuse_restricted",
+            eventName: "submit_result",
+          });
+          return;
+        }
+
+        if (
+          err.code === INSUFFICIENT_CREDIT_ERROR_CODE ||
+          err.code === "INSUFFICIENT_CREDIT"
+        ) {
+          const details = isInsufficientCreditDetails(err.details)
+            ? err.details
+            : null;
+          setAck({
+            type: "insufficient-credit",
+            message: err.message,
+            traceId: err.traceId ?? "",
+            balance: details?.balance ?? 0,
+            required: details?.required ?? 0,
+            shortfall: details?.shortfall ?? 0,
+            videoCreditPerSecond: details?.videoCreditPerSecond ?? 0,
+          });
+          emitFunnelTelemetry({
+            funnelStage: "submit_result",
+            submissionOutcomeClass: "validation_rejected",
+            eventName: "submit_result",
+            code: INSUFFICIENT_CREDIT_ERROR_CODE,
+          });
           return;
         }
 
@@ -242,10 +443,11 @@ export function useJobSubmission(
           violations,
         });
 
-        console.info("telemetry.jobs.generation.acknowledged.v1", {
-          outcome: "rejected",
-          rejectionCodes: violations.map((v) => v.code),
-          clientAckLatencyMs: Date.now() - startedAt,
+        emitFunnelTelemetry({
+          funnelStage: "submit_result",
+          submissionOutcomeClass: "validation_rejected",
+          eventName: "submit_result",
+          code: violations[0]?.code,
         });
         return;
       }
@@ -270,12 +472,13 @@ export function useJobSubmission(
         jobId: data.jobId,
         status: data.status,
       });
-
-      console.info("telemetry.jobs.generation.acknowledged.v1", {
-        outcome: "accepted",
+      emitFunnelTelemetry({
+        funnelStage: "submit_result",
+        submissionOutcomeClass: "accepted",
+        terminalJobStatusClass: "queued",
+        eventName: "submit_result",
         jobId: data.jobId,
-        status: data.status,
-        clientAckLatencyMs: Date.now() - startedAt,
+        qualityTier: requestBody.qualityTier ?? DEFAULT_QUALITY_TIER,
       });
     } catch (caught) {
       if (
@@ -289,6 +492,12 @@ export function useJobSubmission(
           traceId: "",
           violations: [],
         });
+        emitFunnelTelemetry({
+          funnelStage: "submit_result",
+          submissionOutcomeClass: "validation_rejected",
+          eventName: "submit_result",
+          code: "UNAUTHENTICATED",
+        });
       } else {
         hadNetworkFailureSinceLastTerminalAckRef.current = true;
         setAck({
@@ -296,6 +505,11 @@ export function useJobSubmission(
           code: abortController.signal.aborted ? "NETWORK_TIMEOUT" : "NETWORK_ERROR",
           traceId: "",
           violations: [],
+        });
+        emitFunnelTelemetry({
+          funnelStage: "submit_result",
+          submissionOutcomeClass: "network_error",
+          eventName: "submit_result",
         });
       }
     } finally {
@@ -318,7 +532,14 @@ export function useJobSubmission(
       );
       const parsed = await parseBanyoneApiEnvelopeResponse(res);
       if (!parsed.ok) return false;
-      return parsed.envelope.error === null;
+      if (parsed.envelope.error === null) {
+        emitFunnelTelemetry({
+          funnelStage: "disclosure_acknowledged",
+          eventName: "disclosure_acknowledged",
+        });
+        return true;
+      }
+      return false;
     },
     [getIdToken],
   );

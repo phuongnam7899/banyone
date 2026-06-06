@@ -20,6 +20,16 @@ jest.mock('@/features/auth/auth-context', () => ({
   useBanyoneAuth: () => mockBanyoneAuth,
 }));
 
+jest.mock('@/features/create-job/hooks/use-generation-credits', () => ({
+  GenerationCreditsProvider: ({ children }) => children,
+  useGenerationCredits: () => ({
+    credits: { balance: 0, videoCreditPerSecond: 100 },
+    isLoadingCredits: false,
+    creditsError: null,
+    refreshCredits: jest.fn(async () => {}),
+  }),
+}));
+
 afterEach(() => {
   jest.useRealTimers();
 });

@@ -6,7 +6,12 @@ import { HistoryDetailScreen } from './history-detail-screen';
 const mockUseJobHistoryDetail = jest.fn();
 
 jest.mock('expo-router', () => ({
-  useRouter: () => ({ push: jest.fn() }),
+  useRouter: () => ({
+    push: jest.fn(),
+    back: jest.fn(),
+    replace: jest.fn(),
+    canGoBack: jest.fn(() => true),
+  }),
 }));
 
 jest.mock('../hooks/use-job-history', () => ({

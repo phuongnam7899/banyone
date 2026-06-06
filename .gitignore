@@ -3,6 +3,15 @@ dist/
 coverage/
 .DS_Store
 
+# Secrets — never commit real credentials
+.env
+!.env.example
+*firebase-adminsdk*.json
+
+# Local backend runtime data
+apps/backend/.banyone-*/
+apps/backend/.banyone-media-assets/
+
 apps/mobile/.expo/
 apps/mobile/.expo-shared/
 apps/mobile/web-build/

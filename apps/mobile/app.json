@@ -8,12 +8,16 @@
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
     "ios": {
+      "bundleIdentifier": "com.banyone",
+      "googleServicesFile": "./GoogleService-Info.plist",
       "icon": "./assets/expo.icon",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Banyone needs photo library access so you can pick one source video and one reference image for creations."
       }
     },
     "android": {
+      "package": "com.banyone",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

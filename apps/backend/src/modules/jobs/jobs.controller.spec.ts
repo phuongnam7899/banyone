@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-argument -- supertest with Nest INestApplication#getHttpServer() */
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
+import type { Firestore } from 'firebase-admin/firestore';
 import request from 'supertest';
 import * as path from 'path';
 import * as os from 'os';
@@ -12,6 +13,7 @@ import {
 } from '@banyone/contracts';
 
 import { ThrottlerEnvelopeExceptionFilter } from '../auth/throttler-envelope.filter';
+import { FIRESTORE } from '../../infra/firestore.module';
 import { JobsModule } from './jobs.module';
 import { JobsService } from './jobs.service';
 import type {
@@ -85,6 +87,7 @@ describe('JobsController', () => {
         jobId: string;
         status: 'queued' | 'processing' | 'ready' | 'failed';
         updatedAt: string;
+        sourceImageUrl?: string;
       }>;
     };
     error: null;
@@ -94,12 +97,15 @@ describe('JobsController', () => {
   beforeEach(async () => {
     dataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-jobs-'));
     notifDataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-notif-jobs-'));
-    disclosureDataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-disclosure-jobs-'));
+    disclosureDataDir = mkdtempSync(
+      path.join(os.tmpdir(), 'banyone-disclosure-jobs-'),
+    );
     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
     process.env.BANYONE_NOTIFICATIONS_DATA_DIR = notifDataDir;
     process.env.BANYONE_DISCLOSURE_DATA_DIR = disclosureDataDir;
     process.env.BANYONE_AUTH_VERIFIER = 'test';
     process.env.BANYONE_AUTH_TEST_UID = 'test-user-uid';
+    process.env.BANYONE_DEFAULT_USER_CREDITS = '100000';
 
     const moduleRef = await Test.createTestingModule({
       imports: [JobsModule],
@@ -140,6 +146,12 @@ describe('JobsController', () => {
     }
     delete process.env.BANYONE_AUTH_VERIFIER;
     delete process.env.BANYONE_AUTH_TEST_UID;
+    delete process.env.BANYONE_POLICY_BLOCKED_URI_SUBSTRINGS;
+    delete process.env.BANYONE_DEFAULT_USER_CREDITS;
+    delete process.env.BANYONE_VIDEO_CREDIT_PER_SECOND;
+    delete process.env.BANYONE_IS_TESTING_ENV;
+    delete process.env.REPLICATE_API_TOKEN;
+    delete process.env.REPLICATE_MODEL;
   });
 
   const validBody = {
@@ -227,6 +239,124 @@ describe('JobsController', () => {
     expect(body.data.status).toBe('queued');
   });
 
+  it('GET /v1/generation-jobs/credits returns current balance and per-second rate', async () => {
+    const firestore = app.get<Firestore>(FIRESTORE);
+    await firestore.collection('user_credits').doc('test-user-uid').set({
+      balance: 3210,
+      updatedAtMs: Date.now(),
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/v1/generation-jobs/credits')
+      .set(authHeader)
+      .expect(200);
+
+    const body = res.body as {
+      data: { balance: number; videoCreditPerSecond: number };
+      error: null;
+    };
+    expect(body.error).toBeNull();
+    expect(body.data.balance).toBe(3210);
+    expect(body.data.videoCreditPerSecond).toBe(100);
+  });
+
+  it('GET /v1/generation-jobs/credits returns 401 when Authorization is missing', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/generation-jobs/credits')
+      .expect(401);
+
+    const authBody = res.body as Http401AuthBody;
+    expect(authBody.data).toBeNull();
+    expect(authBody.error.code).toBe('UNAUTHENTICATED');
+    expect(authBody.error.retryable).toBe(false);
+    expect(authBody.error.traceId).toEqual(expect.any(String));
+  });
+
+  it('POST /v1/generation-jobs returns INSUFFICIENT_CREDIT when balance is too low', async () => {
+    const firestore = app.get<Firestore>(FIRESTORE);
+    await firestore.collection('user_credits').doc('test-user-uid').set({
+      balance: 50,
+      updatedAtMs: Date.now(),
+    });
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set(authHeader)
+      .set('x-banyone-idempotency-key', 'idem-key-insufficient-credit')
+      .send(validBody)
+      .expect(201);
+
+    const body = res.body as ErrorEnvelope;
+    expect(body.data).toBeNull();
+    expect(body.error.code).toBe('INSUFFICIENT_CREDIT');
+    expect(body.error.retryable).toBe(false);
+    expect(body.error.details).toEqual(
+      expect.objectContaining({
+        balance: 50,
+        required: 6000,
+        shortfall: 5950,
+        videoCreditPerSecond: 100,
+      }),
+    );
+  });
+
+  it('POST /v1/generation-jobs/assets uploads media and returns asset URL envelope', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/generation-jobs/assets')
+      .set(authHeader)
+      .field('slot', 'image')
+      .attach('file', Buffer.from('fake-image-content'), {
+        filename: 'face.jpg',
+        contentType: 'image/jpeg',
+      })
+      .expect(201);
+
+    const body = res.body as {
+      data: {
+        slot: 'image';
+        assetUrl: string;
+        mimeType: string | null;
+        sizeBytes: number;
+      };
+      error: null;
+    };
+    expect(body.error).toBeNull();
+    expect(body.data.slot).toBe('image');
+    expect(body.data.assetUrl).toContain('/v1/media/');
+    expect(body.data.mimeType).toBe('image/jpeg');
+    expect(body.data.sizeBytes).toBeGreaterThan(0);
+  });
+
+  it('POST /v1/generation-jobs persists qualityTier and GET /v1/generation-jobs/:id returns it', async () => {
+    await request(app.getHttpServer())
+      .post('/v1/synthetic-media-disclosure/acknowledge')
+      .set(authHeader)
+      .send({ version: 'v1' })
+      .expect(200);
+
+    const createRes = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set(authHeader)
+      .set('x-banyone-idempotency-key', 'idem-key-quality-tier')
+      .send({ ...validBody, qualityTier: 2 })
+      .expect(201);
+
+    const jobId = (createRes.body as SuccessEnvelope).data.jobId;
+
+    const statusRes = await request(app.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}`)
+      .set(authHeader)
+      .expect(200);
+
+    type StatusOk = {
+      data: { qualityTier?: number; status: string };
+      error: null;
+    };
+    const statusBody = statusRes.body as StatusOk;
+    expect(statusBody.error).toBeNull();
+    expect(statusBody.data.qualityTier).toBe(2);
+  });
+
   it('POST /v1/generation-jobs returns DISCLOSURE_REQUIRED before first acknowledgment', async () => {
     const res = await request(app.getHttpServer())
       .post('/v1/generation-jobs')
@@ -245,6 +375,54 @@ describe('JobsController', () => {
     });
   });
 
+  it('POST /v1/generation-jobs returns PROVIDER_NOT_CONFIGURED in strict runtime mode', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalApiToken = process.env.REPLICATE_API_TOKEN;
+    const originalModel = process.env.REPLICATE_MODEL;
+    process.env.NODE_ENV = 'development';
+    delete process.env.REPLICATE_API_TOKEN;
+    delete process.env.REPLICATE_MODEL;
+
+    try {
+      const res = await request(app.getHttpServer())
+        .post('/v1/generation-jobs')
+        .set(authHeader)
+        .set('x-banyone-idempotency-key', 'idem-key-provider-missing')
+        .send(validBody)
+        .expect(201);
+
+      const body = res.body as ErrorEnvelope;
+      expect(body.data).toBeNull();
+      expect(body.error.code).toBe('PROVIDER_NOT_CONFIGURED');
+      expect(body.error.retryable).toBe(false);
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+      if (originalApiToken === undefined) delete process.env.REPLICATE_API_TOKEN;
+      else process.env.REPLICATE_API_TOKEN = originalApiToken;
+      if (originalModel === undefined) delete process.env.REPLICATE_MODEL;
+      else process.env.REPLICATE_MODEL = originalModel;
+    }
+  });
+
+  it('POST /v1/generation-jobs bypasses Replicate when BANYONE_IS_TESTING_ENV=true', async () => {
+    process.env.BANYONE_IS_TESTING_ENV = 'true';
+    process.env.REPLICATE_API_TOKEN = 'fake-token';
+    process.env.REPLICATE_MODEL = 'wan-video/wan-2.2-animate-replace';
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set(authHeader)
+      .set('x-banyone-idempotency-key', 'idem-key-testing-env-mock')
+      .send(validBody)
+      .expect(201);
+
+    const body = res.body as SuccessEnvelope;
+    expect(body.error).toBeNull();
+    expect(body.data.jobId).toEqual(expect.any(String));
+    expect(body.data.status).toBe('queued');
+  });
+
   it('POST /v1/synthetic-media-disclosure/acknowledge records acceptance for authenticated user', async () => {
     const res = await request(app.getHttpServer())
       .post('/v1/synthetic-media-disclosure/acknowledge')
@@ -252,13 +430,21 @@ describe('JobsController', () => {
       .send({ version: 'v1' })
       .expect(200);
 
-    expect(res.body.error).toBeNull();
-    expect(res.body.data).toMatchObject({
+    const ackBody = res.body as {
+      error: null;
+      data: {
+        accepted: boolean;
+        currentVersion: string;
+        acceptance: { version: string; acceptedAt: string };
+      };
+    };
+    expect(ackBody.error).toBeNull();
+    expect(ackBody.data).toMatchObject({
       accepted: true,
       currentVersion: 'v1',
       acceptance: { version: 'v1' },
     });
-    expect(res.body.data.acceptance.acceptedAt).toEqual(expect.any(String));
+    expect(ackBody.data.acceptance.acceptedAt).toEqual(expect.any(String));
   });
 
   it('POST /v1/generation-jobs returns INPUT_INVALID error envelope with contract-aligned details', async () => {
@@ -306,6 +492,33 @@ describe('JobsController', () => {
       imageStatus: expectedValidation.image.status,
     });
     expect(details.violations).toEqual(expectedViolations);
+  });
+
+  it('POST /v1/generation-jobs returns POLICY_VIOLATION when storage uri matches configured blocklist', async () => {
+    process.env.BANYONE_POLICY_BLOCKED_URI_SUBSTRINGS = '__blocked_uri__';
+    const blockedBody = {
+      ...validBody,
+      video: {
+        ...validBody.video,
+        uri: 'file:///tmp/__blocked_uri__/clip.mp4',
+      },
+    };
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/generation-jobs')
+      .set(authHeader)
+      .set('x-banyone-idempotency-key', 'idem-policy-blocked')
+      .send(blockedBody)
+      .expect(201);
+
+    const body = res.body as ErrorEnvelope;
+    expect(body.data).toBeNull();
+    expect(body.error.code).toBe('POLICY_VIOLATION');
+    expect(body.error.retryable).toBe(false);
+    expect(body.error.details).toEqual({
+      policyCode: 'STORAGE_URI_BLOCKED',
+    });
+    expect(body.error.traceId).toEqual(expect.any(String));
   });
 
   it('is idempotent per x-banyone-idempotency-key (same jobId returned)', async () => {
@@ -471,6 +684,7 @@ describe('JobsController', () => {
       status: 'ready',
       readyAtMs: nowMs,
       updatedAtMs: nowMs,
+      sourceImageUrl: 'http://localhost:3000/assets/image-ready.jpg',
     });
     jobsService.__testSeedJob({
       jobId: 'history-other-user',
@@ -504,6 +718,7 @@ describe('JobsController', () => {
     const first = body.data.items[0];
     expect(first.status).toBe('ready');
     expect(first.updatedAt).toEqual(expect.any(String));
+    expect(first.sourceImageUrl).toBe('http://localhost:3000/assets/image-ready.jpg');
   });
 
   it('GET /v1/generation-jobs/:id returns JOB_NOT_FOUND for non-owned jobs', async () => {
@@ -575,6 +790,41 @@ describe('JobsController', () => {
     if (body.error !== null) throw new Error('Expected success envelope');
     expect(body.data.status).toBe('ready');
     expect(body.data.failure).toBeUndefined();
+  });
+
+  it('marks job failed when final credit debit cannot be completed', async () => {
+    const jobsService = app.get(JobsService);
+    const firestore = app.get<Firestore>(FIRESTORE);
+    const nowMs = Date.now();
+    const jobId = 'job-credit-debit-failure';
+
+    await firestore.collection('user_credits').doc('test-user-uid').set({
+      balance: 0,
+      updatedAtMs: nowMs,
+    });
+
+    jobsService.__testSeedJob({
+      jobId,
+      userId: 'test-user-uid',
+      status: 'processing',
+      processingAtMs: nowMs - 100_000,
+      updatedAtMs: nowMs - 100_000,
+      creditsRequired: 6000,
+    });
+
+    const res = await request(app.getHttpServer())
+      .get(`/v1/generation-jobs/${jobId}`)
+      .set(authHeader)
+      .expect(200);
+
+    const body = res.body as GenerationJobStatusEnvelope;
+    if (body.error !== null) throw new Error('Expected success envelope');
+    expect(body.data.status).toBe('failed');
+    expect(body.data.failure).toMatchObject({
+      retryable: false,
+      reasonCode: 'INSUFFICIENT_CREDIT_BALANCE',
+      nextAction: 'add_credits',
+    });
   });
 
   it('GET /v1/generation-jobs/:id transitions processing -> failed with deterministic retry metadata', async () => {

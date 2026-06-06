@@ -8,6 +8,9 @@ export type CreateGenerationJobMediaInput = {
 
 export type CreateGenerationJobRequestBody = {
   idempotencyKey?: string;
+  /** Product quality tier for metrics segmentation; defaults server-side when omitted. */
+  qualityTier?: number;
+  prompt?: string;
   video: CreateGenerationJobMediaInput;
   image: {
     uri: string | null;

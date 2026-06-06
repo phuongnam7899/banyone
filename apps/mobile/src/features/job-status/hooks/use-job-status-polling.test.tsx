@@ -1,8 +1,17 @@
 import { act, render, screen, waitFor } from '@testing-library/react-native';
 import React from 'react';
 import { AppState, Text, View } from 'react-native';
+import { emitFunnelTelemetry, emitJobExperienceMetrics } from '@/infra/telemetry';
 
 import { useJobStatusPolling } from './use-job-status-polling';
+
+jest.mock('@/infra/telemetry', () => ({
+  emitFunnelTelemetry: jest.fn(),
+  emitJobExperienceMetrics: jest.fn(),
+  emitCreateJobDraftTelemetry: jest.fn(),
+  emitPreviewExportTelemetry: jest.fn(),
+  getTelemetrySessionId: jest.fn(() => 'test-session-id'),
+}));
 
 function Harness({ jobId }: { jobId: string }) {
   const { status, freshnessSamplesMs } = useJobStatusPolling(jobId, null);
@@ -24,6 +33,8 @@ describe('useJobStatusPolling', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.restoreAllMocks();
+    (emitFunnelTelemetry as jest.Mock).mockClear();
+    (emitJobExperienceMetrics as jest.Mock).mockClear();
   });
 
   afterEach(() => {
@@ -65,6 +76,8 @@ describe('useJobStatusPolling', () => {
             jobId: 'job-1',
             status: 'ready',
             updatedAt: new Date(t0 + 1000).toISOString(),
+            qualityTier: 1,
+            timeToPreviewMs: 100,
           },
           error: null,
         }),
@@ -88,6 +101,33 @@ describe('useJobStatusPolling', () => {
     await waitFor(() => {
       expect(screen.getByTestId('job-status.stage').props.children).toBe('processing');
     });
+    expect(emitFunnelTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        funnelStage: 'job_status_transition',
+        terminalJobStatusClass: 'queued',
+      }),
+    );
+    expect(emitFunnelTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        funnelStage: 'job_status_transition',
+        terminalJobStatusClass: 'processing',
+      }),
+    );
+
+    jest.advanceTimersByTime(500);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('job-status.stage').props.children).toBe('ready');
+    });
+    expect(emitJobExperienceMetrics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metricKind: 'lifecycle_terminal_observed',
+        jobId: 'job-1',
+        terminalJobStatusClass: 'ready',
+        qualityTier: 1,
+        serverTimeToPreviewMs: 100,
+      }),
+    );
 
     const lastFreshness = screen.getByTestId('job-status.freshness.last').props.children;
     const allRaw = screen.getByTestId('job-status.freshness.all').props.children;

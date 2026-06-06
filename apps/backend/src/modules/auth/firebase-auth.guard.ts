@@ -23,11 +23,11 @@ export class FirebaseAuthGuard implements CanActivate {
     const authHeader = req.headers.authorization;
 
     try {
-      const { uid } =
+      const { uid, isModerator, isSupport } =
         await this.firebaseAuth.verifyBearerAuthorizationHeader(authHeader);
       (req as Request & { [BANYONE_USER_KEY]: BanyoneAuthUser })[
         BANYONE_USER_KEY
-      ] = { uid };
+      ] = { uid, isModerator, isSupport };
       return true;
     } catch (err: unknown) {
       const code =

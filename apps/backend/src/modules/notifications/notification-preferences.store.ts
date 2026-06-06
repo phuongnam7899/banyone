@@ -1,31 +1,19 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import * as path from 'path';
+import { Inject, Injectable } from '@nestjs/common';
+import type { Firestore } from 'firebase-admin/firestore';
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   type NotificationPreferences,
 } from '@banyone/contracts';
 
-type PersistedNotificationPreferencesStore = {
-  version: 1;
-  preferencesByUserId: Record<string, NotificationPreferences>;
-};
+import { FIRESTORE } from '../../infra/firestore.module';
 
+@Injectable()
 export class NotificationPreferencesStore {
-  private readonly storeDir: string;
-  private readonly storeFilePath: string;
-  private store: PersistedNotificationPreferencesStore;
-
-  constructor() {
-    const configuredDir = process.env.BANYONE_NOTIFICATIONS_DATA_DIR;
-    this.storeDir =
-      configuredDir ?? path.join(process.cwd(), '.banyone-notifications-data');
-    this.storeFilePath = path.join(this.storeDir, 'notification-preferences.json');
-    mkdirSync(this.storeDir, { recursive: true });
-    this.store = this.loadStore();
-  }
+  private readonly cache = new Map<string, NotificationPreferences>();
+  constructor(@Inject(FIRESTORE) private readonly firestore: Firestore) {}
 
   getForUser(userId: string): NotificationPreferences {
-    const prefs = this.store.preferencesByUserId[userId];
+    const prefs = this.cache.get(userId);
     if (!prefs) return DEFAULT_NOTIFICATION_PREFERENCES;
     return prefs;
   }
@@ -35,51 +23,12 @@ export class NotificationPreferencesStore {
     next: NotificationPreferences,
   ): NotificationPreferences {
     const normalized = normalizePreferences(next);
-    this.store.preferencesByUserId[userId] = normalized;
-    this.saveStore();
+    this.cache.set(userId, normalized);
+    void this.firestore
+      .collection('notification_preferences')
+      .doc(userId)
+      .set(normalized);
     return normalized;
-  }
-
-  private loadStore(): PersistedNotificationPreferencesStore {
-    if (!existsSync(this.storeFilePath)) {
-      return { version: 1, preferencesByUserId: {} };
-    }
-    try {
-      const raw = readFileSync(this.storeFilePath, { encoding: 'utf-8' });
-      const parsed = JSON.parse(raw) as unknown;
-      return this.normalizeStore(parsed);
-    } catch {
-      return { version: 1, preferencesByUserId: {} };
-    }
-  }
-
-  private normalizeStore(value: unknown): PersistedNotificationPreferencesStore {
-    if (
-      typeof value !== 'object' ||
-      value === null ||
-      !('preferencesByUserId' in value)
-    ) {
-      return { version: 1, preferencesByUserId: {} };
-    }
-
-    const source = (value as { preferencesByUserId?: unknown }).preferencesByUserId;
-    if (typeof source !== 'object' || source === null || Array.isArray(source)) {
-      return { version: 1, preferencesByUserId: {} };
-    }
-
-    const preferencesByUserId: Record<string, NotificationPreferences> = {};
-    for (const [userId, rawPrefs] of Object.entries(source)) {
-      const normalized = tryParsePreferences(rawPrefs);
-      if (normalized) preferencesByUserId[userId] = normalized;
-    }
-
-    return { version: 1, preferencesByUserId };
-  }
-
-  private saveStore(): void {
-    writeFileSync(this.storeFilePath, `${JSON.stringify(this.store, null, 2)}\n`, {
-      encoding: 'utf-8',
-    });
   }
 }
 

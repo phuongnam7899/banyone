@@ -1,16 +1,38 @@
 import { Injectable } from '@nestjs/common';
+import { Inject } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import * as path from 'path';
-import { validateJobInputCompliance } from '@banyone/contracts';
+import type { Firestore } from 'firebase-admin/firestore';
+import {
+  ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
+  INSUFFICIENT_CREDIT_ERROR_CODE,
+  type JobCostSignalPayloadV1,
+  POLICY_VIOLATION_ERROR_CODE,
+  computeTimeToPreviewMs,
+  DEFAULT_QUALITY_TIER,
+  JOB_LIFECYCLE_METRICS_SCHEMA_VERSION,
+  isJobPolicyViolationDetails,
+  validateJobInputCompliance,
+} from '@banyone/contracts';
 
+import { emitJobLifecycleMetricsV1Log } from '../../telemetry/job-lifecycle-metrics';
+import { FIRESTORE } from '../../infra/firestore.module';
+import {
+  computeJobCostSignalV1,
+  emitJobCostSignalV1Log,
+} from '../../telemetry/job-cost-signal';
+import { AbuseService } from '../abuse/abuse.service';
 import { SyntheticMediaDisclosureStore } from '../disclosure/synthetic-media-disclosure.store';
+import { JobPolicyScreeningService } from '../job-policy/job-policy-screening.service';
 import { JobLifecyclePushService } from '../notifications/job-lifecycle-push.service';
+import { JobMediaAssetsService } from './job-media-assets.service';
 import { assertAllowedLifecycleTransition } from './jobs.lifecycle';
+import { ReplicateGenerationProvider } from './replicate-generation.provider';
 import type { CreateGenerationJobRequestBody } from './dto/create-generation-job.request';
+import { UserCreditsStore } from './user-credits.store';
 import type {
   GenerationJobEnvelope,
   GenerationJobExportEnvelope,
+  GenerationJobCreditsEnvelope,
   GenerationJobHistoryDetailEnvelope,
   GenerationJobHistoryListEnvelope,
   GenerationJobInputViolationDetail,
@@ -35,10 +57,22 @@ type PersistedJobsStore = {
   jobs: Record<string, PersistedJobRecord>;
 };
 
-type PersistedJobRecord = {
+type CreditChargeResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reasonCode: 'INSUFFICIENT_CREDIT_BALANCE' | 'CREDIT_DEBIT_FAILED';
+      retryable: boolean;
+      message: string;
+    };
+
+export type PersistedJobRecord = {
   jobId: string;
   userId: string;
   status: GenerationJobStatus;
+  traceId?: string;
+  /** Metrics segmentation; defaults to {@link DEFAULT_QUALITY_TIER} when missing (legacy rows). */
+  qualityTier?: number;
 
   // Internal timestamps stored as unix epoch milliseconds.
   updatedAtMs: number;
@@ -52,18 +86,52 @@ type PersistedJobRecord = {
     reasonCode: string;
     nextAction: string;
     message: string;
+    traceId?: string;
   };
+  /**
+   * Story 5.3 server-owned internal economics signal (not exposed on user mobile payloads).
+   * Present only after first terminalization (`ready` | `failed`).
+   */
+  jobCostSignalV1?: JobCostSignalPayloadV1;
+  providerKey?: 'replicate';
+  providerPredictionId?: string;
+  providerStatus?: string;
+  sourceVideoUrl?: string;
+  sourceImageUrl?: string;
+  outputUrl?: string;
+  creditsRequired?: number;
+  creditsChargedAtMs?: number;
 };
 
 function scopedIdempotencyKey(userId: string, clientKey: string): string {
   return `${userId}${IDEMPOTENCY_SCOPING_SEP}${clientKey}`;
 }
 
+function normalizeQualityTierInput(input: unknown): number {
+  if (typeof input !== 'number' || !Number.isFinite(input)) {
+    return DEFAULT_QUALITY_TIER;
+  }
+  const n = Math.floor(input);
+  if (n < 1) return 1;
+  if (n > 99) return 99;
+  return n;
+}
+
+function computeRequiredCredits(params: {
+  videoDurationSec: number | null;
+  videoCreditPerSecond: number;
+}): number {
+  const duration = params.videoDurationSec;
+  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) {
+    return 0;
+  }
+  return Math.ceil(duration * params.videoCreditPerSecond);
+}
+
 @Injectable()
 export class JobsService {
-  private readonly storeDir: string;
-  private readonly storeFilePath: string;
   private store: PersistedJobsStore;
+  private storeLoadPromise: Promise<void> | null = null;
   private readonly inFlight = new Map<string, Promise<GenerationJobEnvelope>>();
 
   // MVP lifecycle progression model:
@@ -79,29 +147,44 @@ export class JobsService {
   private illegalTransitionCount = 0;
 
   constructor(
+    @Inject(FIRESTORE) private readonly firestore: Firestore,
     private readonly jobLifecyclePush: JobLifecyclePushService,
     private readonly disclosure: SyntheticMediaDisclosureStore,
+    private readonly abuse: AbuseService,
+    private readonly jobPolicy: JobPolicyScreeningService,
+    private readonly replicateProvider: ReplicateGenerationProvider,
+    private readonly mediaAssets: JobMediaAssetsService,
+    private readonly userCredits: UserCreditsStore,
   ) {
-    // Tests can set BANYONE_JOBS_DATA_DIR to isolate persistence.
-    const configuredDir = process.env.BANYONE_JOBS_DATA_DIR;
-    this.storeDir =
-      configuredDir ?? path.join(process.cwd(), '.banyone-jobs-data');
-    this.storeFilePath = path.join(this.storeDir, 'jobs-store.json');
-    mkdirSync(this.storeDir, { recursive: true });
-    this.store = this.loadStore();
+    this.store = { version: 3, idempotency: {}, jobs: {} };
+    this.logProviderConfiguration();
   }
 
-  private loadStore(): PersistedJobsStore {
-    if (!existsSync(this.storeFilePath)) {
-      return { version: 3, idempotency: {}, jobs: {} };
-    }
-    try {
-      const raw = readFileSync(this.storeFilePath, { encoding: 'utf-8' });
-      const parsedUnknown = JSON.parse(raw) as unknown;
-      return this.normalizePersistedJobsStore(parsedUnknown);
-    } catch {
-      return { version: 3, idempotency: {}, jobs: {} };
-    }
+  private logProviderConfiguration(): void {
+    console.info('telemetry.jobs.provider.config.v1', {
+      provider: 'replicate',
+      enabled: this.replicateProvider.isEnabled(),
+      model: this.replicateProvider.getConfiguredModel() || null,
+      strictMode: !this.allowMockJobFlow(),
+    });
+  }
+
+  private allowMockJobFlow(): boolean {
+    return (
+      process.env.NODE_ENV === 'test' ||
+      process.env.BANYONE_IS_TESTING_ENV === 'true' ||
+      process.env.BANYONE_ALLOW_STUB_JOBS === 'true'
+    );
+  }
+
+  private async ensureStoreLoaded(): Promise<void> {
+    if (this.storeLoadPromise) return this.storeLoadPromise;
+    this.storeLoadPromise = (async () => {
+      const snapshot = await this.firestore.collection('jobs_store').doc('state').get();
+      if (!snapshot.exists) return;
+      this.store = this.normalizePersistedJobsStore(snapshot.data());
+    })();
+    await this.storeLoadPromise;
   }
 
   private normalizePersistedJobsStore(
@@ -159,6 +242,7 @@ export class JobsService {
           jobId,
           userId: LEGACY_UNSCOPED_USER_ID,
           status,
+          qualityTier: DEFAULT_QUALITY_TIER,
           updatedAtMs: nowMs,
           queuedAtMs: status === 'queued' ? nowMs : undefined,
           processingAtMs: status === 'processing' ? nowMs : undefined,
@@ -210,15 +294,60 @@ export class JobsService {
           ...(typeof j.failedAtMs === 'number'
             ? { failedAtMs: j.failedAtMs }
             : {}),
-          ...(typeof j.failure === 'object' &&
-          j.failure !== null &&
-          'retryable' in j.failure &&
-          'reasonCode' in j.failure &&
-          'nextAction' in j.failure &&
-          'message' in j.failure
-            ? {
-                failure: j.failure as PersistedJobRecord['failure'],
-              }
+          ...(typeof j.failure === 'object' && j.failure !== null
+            ? (() => {
+                const failure = j.failure as Record<string, unknown>;
+                if (
+                  typeof failure.retryable !== 'boolean' ||
+                  typeof failure.reasonCode !== 'string' ||
+                  typeof failure.nextAction !== 'string' ||
+                  typeof failure.message !== 'string'
+                ) {
+                  return {};
+                }
+                return {
+                  failure: {
+                    retryable: failure.retryable,
+                    reasonCode: failure.reasonCode,
+                    nextAction: failure.nextAction,
+                    message: failure.message,
+                    ...(typeof failure.traceId === 'string'
+                      ? { traceId: failure.traceId }
+                      : {}),
+                  },
+                };
+              })()
+            : {}),
+          ...(typeof j.traceId === 'string' ? { traceId: j.traceId } : {}),
+          ...(typeof j.qualityTier === 'number'
+            ? { qualityTier: normalizeQualityTierInput(j.qualityTier) }
+            : {}),
+          ...(isPersistedJobCostSignalV1(j.jobCostSignalV1)
+            ? { jobCostSignalV1: j.jobCostSignalV1 }
+            : {}),
+          ...(j.providerKey === 'replicate' ? { providerKey: 'replicate' } : {}),
+          ...(typeof j.providerPredictionId === 'string'
+            ? { providerPredictionId: j.providerPredictionId }
+            : {}),
+          ...(typeof j.providerStatus === 'string'
+            ? { providerStatus: j.providerStatus }
+            : {}),
+          ...(typeof j.sourceVideoUrl === 'string'
+            ? { sourceVideoUrl: j.sourceVideoUrl }
+            : {}),
+          ...(typeof j.sourceImageUrl === 'string'
+            ? { sourceImageUrl: j.sourceImageUrl }
+            : {}),
+          ...(typeof j.outputUrl === 'string' ? { outputUrl: j.outputUrl } : {}),
+          ...(typeof j.creditsRequired === 'number' &&
+          Number.isFinite(j.creditsRequired) &&
+          j.creditsRequired > 0
+            ? { creditsRequired: Math.ceil(j.creditsRequired) }
+            : {}),
+          ...(typeof j.creditsChargedAtMs === 'number' &&
+          Number.isFinite(j.creditsChargedAtMs) &&
+          j.creditsChargedAtMs > 0
+            ? { creditsChargedAtMs: Math.floor(j.creditsChargedAtMs) }
             : {}),
         };
       }
@@ -250,10 +379,8 @@ export class JobsService {
     return { version: 3, idempotency, jobs };
   }
 
-  private saveStore(): void {
-    writeFileSync(this.storeFilePath, JSON.stringify(this.store, null, 2), {
-      encoding: 'utf-8',
-    });
+  private async saveStore(): Promise<void> {
+    await this.firestore.collection('jobs_store').doc('state').set(this.store);
   }
 
   private normalizeIdempotencyKey(
@@ -306,6 +433,7 @@ export class JobsService {
     body: CreateGenerationJobRequestBody;
     idempotencyKeyHeader?: string;
   }): Promise<GenerationJobEnvelope> {
+    await this.ensureStoreLoaded();
     const startedAt = Date.now();
     const normalized = this.normalizeIdempotencyKey(
       params.idempotencyKeyHeader,
@@ -344,6 +472,22 @@ export class JobsService {
     return envelope;
   }
 
+  async getGenerationCredits(params: {
+    userId: string;
+  }): Promise<GenerationJobCreditsEnvelope> {
+    const [balance, videoCreditPerSecond] = await Promise.all([
+      this.userCredits.getBalance(params.userId),
+      Promise.resolve(this.userCredits.getVideoCreditPerSecond()),
+    ]);
+    return {
+      data: {
+        balance,
+        videoCreditPerSecond,
+      },
+      error: null,
+    };
+  }
+
   private recordAckTelemetry(
     envelope: GenerationJobEnvelope,
     startedAt: number,
@@ -358,23 +502,60 @@ export class JobsService {
       return;
     }
 
-    const details = envelope.error.details as
+    const detailsUnknown = envelope.error.details;
+    const policyDetails = isJobPolicyViolationDetails(detailsUnknown)
+      ? detailsUnknown
+      : undefined;
+    const validationDetails = envelope.error.details as
       | GenerationJobValidationErrorDetails
       | undefined;
-    const rejectionCodes = details?.violations?.map((v) => v.code) ?? [];
+    const rejectionCodes =
+      policyDetails !== undefined
+        ? [policyDetails.policyCode]
+        : (validationDetails?.violations?.map((v) => v.code) ?? []);
+    const normalizedRejectionCodes =
+      rejectionCodes.length > 0 ? rejectionCodes : [envelope.error.code];
+    const rejectionReason = this.mapRejectedAckReason(
+      envelope.error.code,
+      envelope.error.message,
+    );
 
     console.info('telemetry.jobs.generation.acknowledged.v1', {
       outcome: 'rejected',
-      rejectionCodes,
+      errorCode: envelope.error.code,
+      rejectionCodes: normalizedRejectionCodes,
+      reason: rejectionReason,
       serverAckHandlingMs: Date.now() - startedAt,
       traceId: envelope.error.traceId,
     });
   }
 
-  getGenerationJobStatus(params: {
+  private mapRejectedAckReason(errorCode: string, message: string): string {
+    if (errorCode !== 'INPUT_INVALID') {
+      return errorCode.toLowerCase();
+    }
+
+    if (message.includes('Video must be uploaded first')) {
+      return 'video_asset_not_uploaded';
+    }
+    if (message.includes('Image must be uploaded first')) {
+      return 'image_asset_not_uploaded';
+    }
+    if (message.includes('Uploaded media could not be read')) {
+      return 'uploaded_media_unreadable';
+    }
+    if (message.includes('Input validation failed')) {
+      return 'contract_validation_failed';
+    }
+
+    return 'input_invalid_unspecified';
+  }
+
+  async getGenerationJobStatus(params: {
     userId: string;
     jobId: string;
-  }): GenerationJobStatusEnvelope {
+  }): Promise<GenerationJobStatusEnvelope> {
+    await this.ensureStoreLoaded();
     const job = this.store.jobs[params.jobId];
     if (!job || job.userId !== params.userId) {
       // Keep canonical envelope shape, even for not-found.
@@ -386,10 +567,14 @@ export class JobsService {
     }
 
     const nowMs = Date.now();
-    const transition = this.advanceJobLifecycleIfNeeded({
-      job,
-      nowMs,
-    });
+    if (
+      job.providerKey === 'replicate' &&
+      job.providerPredictionId &&
+      (job.status === 'queued' || job.status === 'processing')
+    ) {
+      return this.getGenerationJobStatusFromReplicate({ job, nowMs });
+    }
+    const transition = this.advanceJobLifecycleIfNeeded({ job, nowMs });
 
     if (transition) {
       console.info('telemetry.jobs.lifecycle.transition.v1', {
@@ -400,12 +585,26 @@ export class JobsService {
       });
     }
 
-    // Persist any status changes to maintain canonical server truth.
-    if (transition) this.saveStore();
-
     if (transition) {
+      let terminalStatusForMetrics: 'ready' | 'failed' | null = null;
       if (transition.to === 'ready') {
-        this.jobLifecyclePush.notifyJobReady(job.userId, job.jobId);
+        const chargeResult = await this.chargeCreditsOnce(job, nowMs);
+        if (chargeResult.ok) {
+          this.jobLifecyclePush.notifyJobReady(job.userId, job.jobId);
+          terminalStatusForMetrics = 'ready';
+        } else {
+          this.applyCreditChargeFailure({
+            job,
+            nowMs,
+            reasonCode: chargeResult.reasonCode,
+            retryable: chargeResult.retryable,
+            message: chargeResult.message,
+          });
+          if (job.failure) {
+            this.jobLifecyclePush.notifyJobFailed(job.userId, job.jobId, job.failure);
+          }
+          terminalStatusForMetrics = 'failed';
+        }
       }
       if (transition.to === 'failed' && job.failure) {
         this.jobLifecyclePush.notifyJobFailed(
@@ -413,7 +612,34 @@ export class JobsService {
           job.jobId,
           job.failure,
         );
+        terminalStatusForMetrics = 'failed';
       }
+
+      if (terminalStatusForMetrics !== null) {
+        const tier = job.qualityTier ?? DEFAULT_QUALITY_TIER;
+        const costSignal = computeJobCostSignalV1({
+          jobId: job.jobId,
+          qualityTier: tier,
+          terminalStatus: terminalStatusForMetrics,
+        });
+        job.jobCostSignalV1 = costSignal;
+        const timeToPreviewMs = computeTimeToPreviewMs({
+          queuedAtMs: job.queuedAtMs,
+          readyAtMs: job.readyAtMs,
+          terminalStatus: terminalStatusForMetrics,
+        });
+        emitJobLifecycleMetricsV1Log({
+          schemaVersion: JOB_LIFECYCLE_METRICS_SCHEMA_VERSION,
+          jobId: job.jobId,
+          terminalStatus: terminalStatusForMetrics,
+          qualityTier: tier,
+          timeToPreviewMs,
+        });
+        emitJobCostSignalV1Log(costSignal);
+      }
+
+      // Persist any status changes to maintain canonical server truth.
+      await this.saveStore();
     }
 
     const payload = this.mapJobToStatusPayload({
@@ -427,9 +653,132 @@ export class JobsService {
     };
   }
 
-  listGenerationJobs(params: {
+  private async getGenerationJobStatusFromReplicate(params: {
+    job: PersistedJobRecord;
+    nowMs: number;
+  }): Promise<GenerationJobStatusEnvelope> {
+    const { job, nowMs } = params;
+    const previous = job.status;
+    try {
+      const polled = await this.replicateProvider.getPrediction(
+        job.providerPredictionId as string,
+      );
+      const mapped = this.mapReplicateStatus(polled.status, polled.outputUrl);
+      job.providerStatus = polled.status;
+      if (mapped.outputUrl) job.outputUrl = mapped.outputUrl;
+      if (mapped.status !== previous) {
+        job.status = mapped.status;
+        job.updatedAtMs = nowMs;
+        if (mapped.status === 'processing') {
+          job.processingAtMs = nowMs;
+        }
+        if (mapped.status === 'ready') {
+          job.readyAtMs = nowMs;
+          delete job.failure;
+          const chargeResult = await this.chargeCreditsOnce(job, nowMs);
+          if (chargeResult.ok) {
+            this.jobLifecyclePush.notifyJobReady(job.userId, job.jobId);
+          } else {
+            this.applyCreditChargeFailure({
+              job,
+              nowMs,
+              reasonCode: chargeResult.reasonCode,
+              retryable: chargeResult.retryable,
+              message: chargeResult.message,
+            });
+            if (job.failure) {
+              this.jobLifecyclePush.notifyJobFailed(job.userId, job.jobId, job.failure);
+            }
+          }
+        }
+        if (mapped.status === 'failed') {
+          job.failedAtMs = nowMs;
+          job.failure = {
+            ...this.buildFailureMetadata({
+              jobId: job.jobId,
+              traceId: this.readPersistedTraceId(job),
+            }),
+            message:
+              polled.errorMessage?.trim() ||
+              'Processing failed and cannot be retried.',
+          };
+          this.jobLifecyclePush.notifyJobFailed(job.userId, job.jobId, job.failure);
+        }
+        const terminalStatusForMetrics =
+          mapped.status === 'ready' && job.status === 'failed'
+            ? 'failed'
+            : mapped.status;
+        if (terminalStatusForMetrics === 'ready' || terminalStatusForMetrics === 'failed') {
+          const tier = job.qualityTier ?? DEFAULT_QUALITY_TIER;
+          const costSignal = computeJobCostSignalV1({
+            jobId: job.jobId,
+            qualityTier: tier,
+            terminalStatus: terminalStatusForMetrics,
+            inferenceProviderKey: 'replicate',
+          });
+          job.jobCostSignalV1 = costSignal;
+          const timeToPreviewMs = computeTimeToPreviewMs({
+            queuedAtMs: job.queuedAtMs,
+            readyAtMs: job.readyAtMs,
+            terminalStatus: terminalStatusForMetrics,
+          });
+          emitJobLifecycleMetricsV1Log({
+            schemaVersion: JOB_LIFECYCLE_METRICS_SCHEMA_VERSION,
+            jobId: job.jobId,
+            terminalStatus: terminalStatusForMetrics,
+            qualityTier: tier,
+            timeToPreviewMs,
+          });
+          emitJobCostSignalV1Log(costSignal);
+        }
+        await this.saveStore();
+      }
+    } catch {
+      // Keep previous status for polling retries.
+    }
+    return {
+      data: this.mapJobToStatusPayload({ job, nowMs }),
+      error: null,
+    };
+  }
+
+  async getOutputReportEligibility(params: { userId: string; jobId: string }):
+    Promise<
+      | { ok: true }
+      | {
+        ok: false;
+        code: 'JOB_NOT_FOUND' | 'JOB_NOT_READY';
+        message: string;
+        retryable: false;
+      }
+    > {
+    await this.ensureStoreLoaded();
+    const job = this.store.jobs[params.jobId];
+    if (!job || job.userId !== params.userId) {
+      return {
+        ok: false,
+        code: 'JOB_NOT_FOUND',
+        message: 'Generation job not found.',
+        retryable: false,
+      };
+    }
+
+    if (job.status !== 'ready') {
+      return {
+        ok: false,
+        code: 'JOB_NOT_READY',
+        message: 'Reports are accepted only for ready jobs.',
+        retryable: false,
+      };
+    }
+
+    return { ok: true };
+  }
+
+  async listGenerationJobs(params: {
     userId: string;
-  }): GenerationJobHistoryListEnvelope {
+  }): Promise<GenerationJobHistoryListEnvelope> {
+    await this.ensureStoreLoaded();
     const items = Object.values(this.store.jobs)
       .filter((job) => job.userId === params.userId)
       .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
@@ -437,6 +786,9 @@ export class JobsService {
         jobId: job.jobId,
         status: job.status,
         updatedAt: new Date(job.updatedAtMs).toISOString(),
+        ...(typeof job.sourceImageUrl === 'string'
+          ? { sourceImageUrl: job.sourceImageUrl }
+          : {}),
       }));
 
     return {
@@ -446,10 +798,11 @@ export class JobsService {
     };
   }
 
-  getGenerationJobHistoryDetail(params: {
+  async getGenerationJobHistoryDetail(params: {
     userId: string;
     jobId: string;
-  }): GenerationJobHistoryDetailEnvelope {
+  }): Promise<GenerationJobHistoryDetailEnvelope> {
+    await this.ensureStoreLoaded();
     const job = this.store.jobs[params.jobId];
     if (!job || job.userId !== params.userId) {
       return this.makeErrorEnvelope({
@@ -482,10 +835,153 @@ export class JobsService {
     };
   }
 
-  getGenerationJobPreview(params: {
+  async getJobSnapshotForModeration(params: { jobId: string }): Promise<{
+    jobId: string;
+    userId: string;
+    status: GenerationJobStatus;
+    updatedAt: string;
+    queuedAt?: string;
+    processingAt?: string;
+    readyAt?: string;
+    failedAt?: string;
+    failure?: {
+      retryable: boolean;
+      reasonCode: string;
+      nextAction: string;
+      message: string;
+    };
+  } | null> {
+    await this.ensureStoreLoaded();
+    const snapshot = this.getInternalJobSnapshot(params);
+    if (!snapshot) return null;
+
+    return {
+      jobId: snapshot.jobId,
+      userId: snapshot.userId,
+      status: snapshot.status,
+      updatedAt: snapshot.updatedAt,
+      ...(snapshot.queuedAt ? { queuedAt: snapshot.queuedAt } : {}),
+      ...(snapshot.processingAt ? { processingAt: snapshot.processingAt } : {}),
+      ...(snapshot.readyAt ? { readyAt: snapshot.readyAt } : {}),
+      ...(snapshot.failedAt ? { failedAt: snapshot.failedAt } : {}),
+      ...(snapshot.failure ? { failure: snapshot.failure } : {}),
+    };
+  }
+
+  async getJobDiagnosticsSnapshot(params: { jobId: string }): Promise<{
+    jobId: string;
+    userId: string;
+    status: GenerationJobStatus;
+    traceId: string;
+    updatedAt: string;
+    queuedAt?: string;
+    processingAt?: string;
+    readyAt?: string;
+    failedAt?: string;
+    failure?: {
+      retryable: boolean;
+      reasonCode: string;
+      nextAction: string;
+    };
+  } | null> {
+    await this.ensureStoreLoaded();
+    const snapshot = this.getInternalJobSnapshot(params);
+    if (!snapshot) return null;
+
+    return {
+      jobId: snapshot.jobId,
+      userId: snapshot.userId,
+      status: snapshot.status,
+      traceId: snapshot.traceId,
+      updatedAt: snapshot.updatedAt,
+      ...(snapshot.queuedAt ? { queuedAt: snapshot.queuedAt } : {}),
+      ...(snapshot.processingAt ? { processingAt: snapshot.processingAt } : {}),
+      ...(snapshot.readyAt ? { readyAt: snapshot.readyAt } : {}),
+      ...(snapshot.failedAt ? { failedAt: snapshot.failedAt } : {}),
+      ...(snapshot.failure
+        ? {
+            failure: {
+              retryable: snapshot.failure.retryable,
+              reasonCode: snapshot.failure.reasonCode,
+              nextAction: snapshot.failure.nextAction,
+            },
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * Internal analytics snapshot used for aggregate reporting.
+   * Includes only fields required by quality-tier comparisons.
+   */
+  async listJobsForQualityTierComparison(): Promise<Array<{
+    jobId: string;
+    status: GenerationJobStatus;
+    qualityTier?: number;
+    queuedAtMs?: number;
+    readyAtMs?: number;
+    failedAtMs?: number;
+    jobCostSignalV1?: JobCostSignalPayloadV1;
+  }>> {
+    await this.ensureStoreLoaded();
+    return Object.values(this.store.jobs).map((job) => ({
+      jobId: job.jobId,
+      status: job.status,
+      ...(typeof job.qualityTier === 'number' ? { qualityTier: job.qualityTier } : {}),
+      ...(typeof job.queuedAtMs === 'number' ? { queuedAtMs: job.queuedAtMs } : {}),
+      ...(typeof job.readyAtMs === 'number' ? { readyAtMs: job.readyAtMs } : {}),
+      ...(typeof job.failedAtMs === 'number' ? { failedAtMs: job.failedAtMs } : {}),
+      ...(job.jobCostSignalV1 ? { jobCostSignalV1: job.jobCostSignalV1 } : {}),
+    }));
+  }
+
+  private getInternalJobSnapshot(params: { jobId: string }): {
+    jobId: string;
+    userId: string;
+    status: GenerationJobStatus;
+    traceId: string;
+    updatedAt: string;
+    queuedAt?: string;
+    processingAt?: string;
+    readyAt?: string;
+    failedAt?: string;
+    failure?: {
+      retryable: boolean;
+      reasonCode: string;
+      nextAction: string;
+      message: string;
+    };
+  } | null {
+    const job = this.store.jobs[params.jobId];
+    if (!job) return null;
+
+    return {
+      jobId: job.jobId,
+      userId: job.userId,
+      status: job.status,
+      traceId: this.readPersistedTraceId(job),
+      updatedAt: new Date(job.updatedAtMs).toISOString(),
+      ...(typeof job.queuedAtMs === 'number'
+        ? { queuedAt: new Date(job.queuedAtMs).toISOString() }
+        : {}),
+      ...(typeof job.processingAtMs === 'number'
+        ? { processingAt: new Date(job.processingAtMs).toISOString() }
+        : {}),
+      ...(typeof job.readyAtMs === 'number'
+        ? { readyAt: new Date(job.readyAtMs).toISOString() }
+        : {}),
+      ...(typeof job.failedAtMs === 'number'
+        ? { failedAt: new Date(job.failedAtMs).toISOString() }
+        : {}),
+      ...(job.failure ? { failure: job.failure } : {}),
+    };
+  }
+
+  async getGenerationJobPreview(params: {
     userId: string;
     jobId: string;
-  }): GenerationJobPreviewEnvelope {
+  }): Promise<GenerationJobPreviewEnvelope> {
+    await this.ensureStoreLoaded();
     const job = this.store.jobs[params.jobId];
     if (!job || job.userId !== params.userId) {
       return this.makeErrorEnvelope({
@@ -503,6 +999,18 @@ export class JobsService {
       });
     }
     if (this.shouldPreviewFail(job.jobId)) {
+      if (job.providerKey === 'replicate' && job.outputUrl) {
+        return {
+          data: {
+            jobId: job.jobId,
+            status: 'ready',
+            updatedAt: new Date(job.updatedAtMs).toISOString(),
+            previewUri: job.outputUrl,
+            mimeType: 'video/mp4',
+          },
+          error: null,
+        };
+      }
       return this.makeErrorEnvelope({
         code: 'PREVIEW_LOAD_FAILED',
         message: 'Preview failed to load. Please retry.',
@@ -516,17 +1024,32 @@ export class JobsService {
         jobId: job.jobId,
         status: 'ready',
         updatedAt: new Date(job.updatedAtMs).toISOString(),
-        previewUri: `https://cdn.banyone.local/generated/${job.jobId}.mp4`,
+        previewUri:
+          job.outputUrl ?? `https://cdn.banyone.local/generated/${job.jobId}.mp4`,
         mimeType: 'video/mp4',
       },
       error: null,
     };
   }
 
-  createGenerationJobExport(params: {
+  async createGenerationJobExport(params: {
     userId: string;
     jobId: string;
-  }): GenerationJobExportEnvelope {
+  }): Promise<GenerationJobExportEnvelope> {
+    await this.ensureStoreLoaded();
+    const abuseRestriction = await this.abuse.checkRestriction({
+      userId: params.userId,
+      action: 'generation_job_export',
+    });
+    if (abuseRestriction.blocked) {
+      return this.makeErrorEnvelope({
+        code: ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
+        message: 'This account is currently restricted from this action.',
+        retryable: abuseRestriction.details.expiresAt !== undefined,
+        details: abuseRestriction.details,
+      });
+    }
+
     const job = this.store.jobs[params.jobId];
     if (!job || job.userId !== params.userId) {
       return this.makeErrorEnvelope({
@@ -544,6 +1067,18 @@ export class JobsService {
       });
     }
     if (this.shouldExportFail(job.jobId)) {
+      if (job.providerKey === 'replicate' && job.outputUrl) {
+        return {
+          data: {
+            jobId: job.jobId,
+            status: 'ready',
+            updatedAt: new Date(job.updatedAtMs).toISOString(),
+            exportUri: job.outputUrl,
+            mimeType: 'video/mp4',
+          },
+          error: null,
+        };
+      }
       return this.makeErrorEnvelope({
         code: 'EXPORT_PREPARATION_FAILED',
         message: 'Unable to prepare export file. Please retry.',
@@ -557,7 +1092,7 @@ export class JobsService {
         jobId: job.jobId,
         status: 'ready',
         updatedAt: new Date(job.updatedAtMs).toISOString(),
-        exportUri: `file:///tmp/banyone/${job.jobId}.mp4`,
+        exportUri: job.outputUrl ?? `file:///tmp/banyone/${job.jobId}.mp4`,
         mimeType: 'video/mp4',
       },
       error: null,
@@ -582,11 +1117,16 @@ export class JobsService {
     jobId: string;
     userId?: string;
     status: GenerationJobStatus;
+    traceId?: string;
+    qualityTier?: number;
     updatedAtMs?: number;
     queuedAtMs?: number;
     processingAtMs?: number;
     readyAtMs?: number;
     failedAtMs?: number;
+    sourceImageUrl?: string;
+    creditsRequired?: number;
+    creditsChargedAtMs?: number;
     failure?: {
       retryable: boolean;
       reasonCode: string;
@@ -619,11 +1159,28 @@ export class JobsService {
       jobId: params.jobId,
       userId,
       status: params.status,
+      ...(params.traceId ? { traceId: params.traceId } : {}),
+      ...(params.qualityTier !== undefined
+        ? { qualityTier: normalizeQualityTierInput(params.qualityTier) }
+        : {}),
       updatedAtMs,
       queuedAtMs,
       processingAtMs,
       readyAtMs,
       failedAtMs,
+      ...(typeof params.sourceImageUrl === 'string'
+        ? { sourceImageUrl: params.sourceImageUrl }
+        : {}),
+      ...(typeof params.creditsRequired === 'number' &&
+      Number.isFinite(params.creditsRequired) &&
+      params.creditsRequired > 0
+        ? { creditsRequired: Math.ceil(params.creditsRequired) }
+        : {}),
+      ...(typeof params.creditsChargedAtMs === 'number' &&
+      Number.isFinite(params.creditsChargedAtMs) &&
+      params.creditsChargedAtMs > 0
+        ? { creditsChargedAtMs: Math.floor(params.creditsChargedAtMs) }
+        : {}),
       ...(params.status === 'failed' && params.failure
         ? { failure: params.failure }
         : {}),
@@ -684,7 +1241,10 @@ export class JobsService {
           delete job.failure;
         } else {
           job.failedAtMs = nowMs;
-          job.failure = this.buildFailureMetadata({ jobId: job.jobId });
+          job.failure = this.buildFailureMetadata({
+            jobId: job.jobId,
+            traceId: this.readPersistedTraceId(job),
+          });
         }
 
         return { from, to, occurredAtMs: nowMs };
@@ -702,11 +1262,25 @@ export class JobsService {
     const { job, nowMs } = params;
     const updatedAt = new Date(job.updatedAtMs).toISOString();
 
+    const tier = job.qualityTier ?? DEFAULT_QUALITY_TIER;
+
     const payload: GenerationJobStatusPayload = {
       jobId: job.jobId,
       status: job.status,
       updatedAt,
+      qualityTier: tier,
     };
+
+    if (job.status === 'ready') {
+      const ttp = computeTimeToPreviewMs({
+        queuedAtMs: job.queuedAtMs,
+        readyAtMs: job.readyAtMs,
+        terminalStatus: 'ready',
+      });
+      if (typeof ttp === 'number') {
+        payload.timeToPreviewMs = ttp;
+      }
+    }
 
     if (job.status === 'queued') {
       const queuedAtMs = job.queuedAtMs ?? job.updatedAtMs;
@@ -751,6 +1325,8 @@ export class JobsService {
   }
 
   private shouldJobFail(jobId: string): boolean {
+    // Local testing mode should avoid flaky failure branches so UI flows stay stable.
+    if (this.allowMockJobFlow()) return false;
     const lastChar = (jobId ?? '').trim().slice(-1).toLowerCase();
     const digit = /^[0-9a-f]$/.test(lastChar)
       ? parseInt(lastChar, 16)
@@ -763,11 +1339,100 @@ export class JobsService {
   }
 
   private shouldPreviewFail(jobId: string): boolean {
+    if (this.allowMockJobFlow()) return false;
     return this.readDeterministicHexDigit(jobId) % 5 === 1;
   }
 
   private shouldExportFail(jobId: string): boolean {
+    if (this.allowMockJobFlow()) return false;
     return this.readDeterministicHexDigit(jobId) % 5 === 2;
+  }
+
+  private mapReplicateStatus(
+    status: string,
+    outputUrl?: string,
+  ): { status: GenerationJobStatus; outputUrl?: string } {
+    if (status === 'succeeded') return { status: 'ready', outputUrl };
+    if (status === 'failed' || status === 'canceled') return { status: 'failed' };
+    if (status === 'starting' || status === 'processing') {
+      return { status: 'processing' };
+    }
+    return { status: 'queued' };
+  }
+
+  private readPersistedTraceId(job: PersistedJobRecord): string {
+    const directTraceId =
+      typeof job.traceId === 'string' && job.traceId.length > 0
+        ? job.traceId
+        : undefined;
+    if (directTraceId) return directTraceId;
+
+    const failureTraceId =
+      typeof job.failure?.traceId === 'string' && job.failure.traceId.length > 0
+        ? job.failure.traceId
+        : undefined;
+    if (failureTraceId) return failureTraceId;
+
+    return `legacy-trace:${job.jobId}`;
+  }
+
+  private async chargeCreditsOnce(
+    job: PersistedJobRecord,
+    nowMs: number,
+  ): Promise<CreditChargeResult> {
+    const required = Math.max(0, Math.ceil(job.creditsRequired ?? 0));
+    if (required <= 0 || typeof job.creditsChargedAtMs === 'number') {
+      return { ok: true };
+    }
+    try {
+      await this.userCredits.debit(job.userId, required);
+      job.creditsChargedAtMs = nowMs;
+      return { ok: true };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'unknown';
+      console.error('telemetry.jobs.credits.debit_failed.v1', {
+        jobId: job.jobId,
+        userId: job.userId,
+        required,
+        message: errorMessage,
+      });
+      if (errorMessage === 'INSUFFICIENT_CREDIT_BALANCE') {
+        return {
+          ok: false,
+          reasonCode: 'INSUFFICIENT_CREDIT_BALANCE',
+          retryable: false,
+          message:
+            'Generation completed but credit balance was insufficient during final charge.',
+        };
+      }
+      return {
+        ok: false,
+        reasonCode: 'CREDIT_DEBIT_FAILED',
+        retryable: true,
+        message: 'Generation completed but charging credits failed. Please retry.',
+      };
+    }
+  }
+
+  private applyCreditChargeFailure(params: {
+    job: PersistedJobRecord;
+    nowMs: number;
+    reasonCode: 'INSUFFICIENT_CREDIT_BALANCE' | 'CREDIT_DEBIT_FAILED';
+    retryable: boolean;
+    message: string;
+  }): void {
+    const { job, nowMs, reasonCode, retryable, message } = params;
+    job.status = 'failed';
+    job.failedAtMs = nowMs;
+    job.updatedAtMs = nowMs;
+    delete job.readyAtMs;
+    job.failure = {
+      retryable,
+      reasonCode,
+      nextAction: retryable ? 'retry' : 'add_credits',
+      message,
+      traceId: this.readPersistedTraceId(job),
+    };
   }
 
   private readDeterministicHexDigit(value: string): number {
@@ -776,11 +1441,12 @@ export class JobsService {
     return value.length % 16;
   }
 
-  private buildFailureMetadata(params: { jobId: string }): {
+  private buildFailureMetadata(params: { jobId: string; traceId?: string }): {
     retryable: boolean;
     reasonCode: string;
     nextAction: string;
     message: string;
+    traceId?: string;
   } {
     const lastChar = (params.jobId ?? '').trim().slice(-1).toLowerCase();
     const digit = /^[0-9a-f]$/.test(lastChar)
@@ -796,21 +1462,23 @@ export class JobsService {
           reasonCode: 'PROCESSING_FAILED_RETRYABLE',
           nextAction: 'retry',
           message: 'Processing failed. You can retry this job.',
+          ...(params.traceId ? { traceId: params.traceId } : {}),
         }
       : {
           retryable: false,
           reasonCode: 'PROCESSING_FAILED_NON_RETRYABLE',
           nextAction: 'contact_support',
           message: 'Processing failed and cannot be retried.',
+          ...(params.traceId ? { traceId: params.traceId } : {}),
         };
   }
 
-  private handleCreateForKey(params: {
+  private async handleCreateForKey(params: {
     userId: string;
     key: string;
     body: CreateGenerationJobRequestBody;
-  }): GenerationJobEnvelope {
-    if (!this.disclosure.isAcceptedForUser(params.userId)) {
+  }): Promise<GenerationJobEnvelope> {
+    if (!(await this.disclosure.isAcceptedForUser(params.userId))) {
       return this.makeErrorEnvelope({
         code: DISCLOSURE_REQUIRED_ERROR_CODE,
         message:
@@ -820,6 +1488,40 @@ export class JobsService {
           currentVersion: this.disclosure.getCurrentVersion(),
           action: 'acknowledge_disclosure',
         },
+      });
+    }
+
+    const automatedRestriction = await this.abuse.evaluateAutomatedThreshold({
+      userId: params.userId,
+    });
+    if (automatedRestriction) {
+      return this.makeErrorEnvelope({
+        code: ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
+        message: 'This account is currently restricted from this action.',
+        retryable: automatedRestriction.expiresAt !== undefined,
+        details: {
+          restrictionId: automatedRestriction.restrictionId,
+          subjectType: automatedRestriction.subjectType,
+          subjectId: automatedRestriction.subjectId,
+          reason: automatedRestriction.reason,
+          source: automatedRestriction.source,
+          ...(automatedRestriction.expiresAt
+            ? { expiresAt: automatedRestriction.expiresAt }
+            : {}),
+        },
+      });
+    }
+
+    const abuseRestriction = await this.abuse.checkRestriction({
+      userId: params.userId,
+      action: 'generation_job_create',
+    });
+    if (abuseRestriction.blocked) {
+      return this.makeErrorEnvelope({
+        code: ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
+        message: 'This account is currently restricted from this action.',
+        retryable: abuseRestriction.details.expiresAt !== undefined,
+        details: abuseRestriction.details,
       });
     }
 
@@ -885,22 +1587,187 @@ export class JobsService {
       });
     }
 
+    const policyResult = this.jobPolicy.evaluate({
+      userId: params.userId,
+      body: params.body,
+    });
+    if (policyResult.decision === 'block') {
+      const envelope = this.makeErrorEnvelope({
+        code: POLICY_VIOLATION_ERROR_CODE,
+        message: policyResult.message,
+        retryable: false,
+        details: { policyCode: policyResult.policyCode },
+      });
+      if (envelope.error !== null) {
+        console.info('telemetry.jobs.policy.rejected.v1', {
+          traceId: envelope.error.traceId,
+          policyCode: policyResult.policyCode,
+          userId: params.userId,
+        });
+      }
+      return envelope;
+    }
+
+    const videoCreditPerSecond = this.userCredits.getVideoCreditPerSecond();
+    const creditsRequired = computeRequiredCredits({
+      videoDurationSec: params.body.video.durationSec,
+      videoCreditPerSecond,
+    });
+    const creditStatus = await this.userCredits.hasEnough(
+      params.userId,
+      creditsRequired,
+    );
+    if (!creditStatus.ok) {
+      return this.makeErrorEnvelope({
+        code: INSUFFICIENT_CREDIT_ERROR_CODE,
+        message: 'Not enough credits to generate this video.',
+        retryable: false,
+        details: {
+          balance: creditStatus.balance,
+          required: creditsRequired,
+          shortfall: Math.max(0, creditsRequired - creditStatus.balance),
+          videoCreditPerSecond,
+        },
+      });
+    }
+
     const jobId = randomUUID();
-    const status: GenerationJobStatus = 'queued';
     const nowMs = Date.now();
+    const traceId = randomUUID();
+    const qualityTier = normalizeQualityTierInput(params.body.qualityTier);
+    let status: GenerationJobStatus = 'queued';
+    let providerPredictionId: string | undefined;
+    let providerStatus: string | undefined;
+    let outputUrl: string | undefined;
+    const allowMockFlow = this.allowMockJobFlow();
+    const usingReplicate = this.replicateProvider.isEnabled();
+    if (!usingReplicate && !allowMockFlow) {
+      return this.makeErrorEnvelope({
+        code: 'PROVIDER_NOT_CONFIGURED',
+        message:
+          'Replicate provider is not configured. Set REPLICATE_API_TOKEN and REPLICATE_MODEL.',
+        retryable: false,
+      });
+    }
+    if (usingReplicate && !allowMockFlow) {
+      if (!this.mediaAssets.isManagedAssetUrl(params.body.video.uri)) {
+        return this.makeErrorEnvelope({
+          code: 'INPUT_INVALID',
+          message:
+            'Video must be uploaded first (POST /v1/generation-jobs/assets); use the returned asset URL.',
+          retryable: false,
+        });
+      }
+      if (!this.mediaAssets.isManagedAssetUrl(params.body.image.uri)) {
+        return this.makeErrorEnvelope({
+          code: 'INPUT_INVALID',
+          message:
+            'Image must be uploaded first (POST /v1/generation-jobs/assets); use the returned asset URL.',
+          retryable: false,
+        });
+      }
+      let videoBuffer: Buffer;
+      let imageBuffer: Buffer;
+      try {
+        videoBuffer = this.mediaAssets.readUploadedAssetBuffer(params.body.video.uri);
+        imageBuffer = this.mediaAssets.readUploadedAssetBuffer(params.body.image.uri);
+      } catch {
+        return this.makeErrorEnvelope({
+          code: 'INPUT_INVALID',
+          message: 'Uploaded media could not be read. Re-upload and try again.',
+          retryable: false,
+        });
+      }
+      try {
+        const prediction = await this.replicateProvider.createPrediction({
+          video: videoBuffer,
+          characterImage: imageBuffer,
+          prompt: params.body.prompt,
+        });
+        providerPredictionId = prediction.predictionId;
+        providerStatus = prediction.status;
+        const mapped = this.mapReplicateStatus(prediction.status);
+        status = mapped.status;
+        outputUrl = mapped.outputUrl;
+      } catch (error) {
+        this.mediaAssets.deleteByUrl(params.body.video.uri ?? undefined);
+        this.mediaAssets.deleteByUrl(params.body.image.uri ?? undefined);
+        return this.makeErrorEnvelope({
+          code: 'PROVIDER_SUBMIT_FAILED',
+          message: 'Unable to submit generation request to provider.',
+          retryable: true,
+          details:
+            error instanceof Error
+              ? { provider: 'replicate', reason: error.message }
+              : { provider: 'replicate' },
+        });
+      }
+    }
 
     this.store.jobs[jobId] = {
       jobId,
       userId: params.userId,
       status,
+      traceId,
+      qualityTier,
       updatedAtMs: nowMs,
       queuedAtMs: nowMs,
+      ...(usingReplicate && !allowMockFlow
+        ? { providerKey: 'replicate' as const }
+        : {}),
+      ...(providerPredictionId ? { providerPredictionId } : {}),
+      ...(providerStatus ? { providerStatus } : {}),
+      ...(params.body.video.uri ? { sourceVideoUrl: params.body.video.uri } : {}),
+      ...(params.body.image.uri ? { sourceImageUrl: params.body.image.uri } : {}),
+      ...(outputUrl ? { outputUrl } : {}),
+      ...(creditsRequired > 0 ? { creditsRequired } : {}),
+      ...(status === 'processing' ? { processingAtMs: nowMs } : {}),
+      ...(status === 'ready' ? { readyAtMs: nowMs } : {}),
+      ...(status === 'failed'
+        ? {
+            failedAtMs: nowMs,
+            failure: this.buildFailureMetadata({
+              jobId,
+              traceId,
+            }),
+          }
+        : {}),
     };
     this.store.idempotency[params.key] = { jobId, status };
-    this.saveStore();
+      await this.saveStore();
 
-    this.enqueuePlaceholderProcessing();
+    if (!usingReplicate || allowMockFlow) this.enqueuePlaceholderProcessing();
     this.jobLifecyclePush.notifyJobQueued(params.userId, jobId);
     return this.makeSuccessEnvelope({ jobId, status });
   }
+}
+
+function isPersistedJobCostSignalV1(
+  input: unknown,
+): input is JobCostSignalPayloadV1 {
+  if (typeof input !== 'object' || input === null) return false;
+  const row = input as Record<string, unknown>;
+  if (row.schemaVersion !== 1) return false;
+  if (typeof row.jobId !== 'string' || row.jobId.length === 0) return false;
+  if (
+    row.terminalStatus !== 'ready' &&
+    row.terminalStatus !== 'failed'
+  ) {
+    return false;
+  }
+  if (typeof row.qualityTier !== 'number') return false;
+  if (typeof row.costModelVersion !== 'string') return false;
+  if (
+    typeof row.inferenceProviderKey !== 'undefined' &&
+    typeof row.inferenceProviderKey !== 'string'
+  ) {
+    return false;
+  }
+  if (typeof row.estimatedCost !== 'object' || row.estimatedCost === null) {
+    return false;
+  }
+  const estimatedCost = row.estimatedCost as Record<string, unknown>;
+  if (typeof estimatedCost.amount !== 'number') return false;
+  if (estimatedCost.currencyCode !== 'USD') return false;
+  return true;
 }

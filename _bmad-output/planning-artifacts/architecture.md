@@ -10,7 +10,7 @@ user_name: 'Nam'
 date: '2026-03-23'
 lastStep: 8
 status: 'complete'
-completedAt: '2026-03-23'
+completedAt: '2026-05-31'
 ---
 
 # Architecture Decision Document
@@ -181,6 +181,15 @@ nest new backend
 - **Rate limiting:** per-endpoint and per-identity class (guest/new/trusted users) with stricter limits on compute-heavy endpoints.
 - **Service communication:** synchronous API for user operations; asynchronous worker processing for inference jobs via queue-driven execution model.
 
+### Billing & Subscription Architecture
+
+- **Subscription product model:** support `weekly`, `monthly`, and `yearly` Banyone Pro auto-renewable plans with explicit `planId`, `storeProductId`, `billingPeriod`, `creditsPerPeriod`, and `platform` metadata.
+- **Entitlement authority:** backend validated entitlement state is canonical for credit grant eligibility and paywall/feature gating; mobile reflects backend state after purchase, restore, and foreground refresh.
+- **Grant ledger:** every initial purchase and renewal creates a durable credit-grant record keyed by billing event identity to support auditability and support diagnostics.
+- **Idempotent billing ingestion:** store billing notifications and RevenueCat events are processed at-most-once for grants using immutable external event IDs + dedupe store.
+- **Restore/manage contract:** restore purchases, plan-change visibility, cancel/manage routing, and active-plan display are first-class flows across iOS and Android.
+- **Support visibility:** support tooling includes subscription status plus billing-linked credit grant history for account-level investigation.
+
 ### Frontend Architecture
 
 - **Stack:** Expo React Native with TypeScript.
@@ -293,6 +302,8 @@ nest new backend
 - Event payloads must include: `eventId`, `occurredAt`, `version`, `actor`, `resourceId`, `payload`.
 - Version bump required for breaking payload changes; consumers remain backward compatible for at least one version window.
 - Event publication occurs only after successful state transition commits.
+- Billing event names follow the same scheme (example: `billing.subscription.renewed.v1`, `billing.credits.granted.v1`, `billing.subscription.restored.v1`).
+- Billing event payloads must include `platform`, `storeEventId`, `appUserId`, `entitlementId`, `creditsGranted`, and `grantLedgerId`.
 
 **State Management Patterns:**
 - Backend job state machine is canonical: `queued -> processing -> ready | failed`.
@@ -314,6 +325,12 @@ nest new backend
 - Retry affordances appear only for `retryable=true` failures.
 - Draft input state persists across app backgrounding/restart.
 
+**Billing Event Processing Patterns:**
+- Billing webhooks/events are acknowledged only after dedupe check + durable event persistence.
+- Credit grants are executed in a transaction-like unit: validate entitlement -> write grant ledger -> update credit balance -> publish billing telemetry.
+- Duplicate store notifications must resolve to no-op grant behavior while still logging the duplicate for observability.
+- Foreground entitlement refresh after external store management changes is explicit and bounded by the product NFR target.
+
 ### Agent Implementation Guardrails
 
 **All AI Agents MUST:**
@@ -324,6 +341,9 @@ nest new backend
 - Add/maintain OpenAPI docs for all public endpoints.
 - Add tests for any new lifecycle transition, error code, or contract field.
 - Add stable `testID` values for new interactive frontend elements.
+- Keep billing logic inside billing module/services; controllers and paywall UI never perform direct credit mutation.
+- Treat subscription restore/purchase/renewal as auditable domain events with dedupe enforcement.
+- Ensure subscription and credit APIs expose support-safe diagnostics without leaking store-sensitive payloads.
 
 ### Verification & Enforcement
 
@@ -332,11 +352,13 @@ nest new backend
 - Unit tests for touched modules must pass.
 - Contract tests for API envelope/error schema must pass.
 - Integration/e2e for critical path changes must pass.
+- Billing webhook and dedupe tests must pass for any billing module change.
 
 **Minimum Test Matrix by Feature Type:**
 - API endpoint change: unit + contract test + integration test.
 - Job lifecycle change: state-machine transition tests + retry/idempotency tests.
 - Mobile workflow change: component/screen tests + at least one flow-level test on happy/failure paths.
+- Billing/subscription change: purchase/renewal/restore integration tests + duplicate-event idempotency test + entitlement-refresh mobile flow test.
 
 **Pattern Enforcement Process:**
 - Pattern violations are documented in PR notes with remediation plan.
@@ -526,6 +548,7 @@ banyone/
 - Notifications (FR20-FR21) -> mobile notification preference UI, backend `modules/notifications`, `adapters/fcm`.
 - Support tooling (FR22-FR24) -> backend `modules/support`, telemetry, and diagnostics data models.
 - Analytics/business instrumentation (FR25-FR28) -> backend `modules/analytics`, mobile telemetry layer, shared contracts.
+- Monetization/subscription (FR29-FR38) -> mobile `features/billing` (paywall + active plan UX), backend `modules/billing` (entitlements, grant ledger, dedupe), and `adapters/revenuecat` (store event ingestion/orchestration).
 
 **Cross-Cutting Concerns:**
 - Auth and policy guardrails -> `apps/backend/src/common/guards`, `decorators`, `modules/auth`.
@@ -544,9 +567,11 @@ banyone/
 - Firebase Auth/Firestore/Storage/FCM from backend adapters and selected mobile SDK surfaces.
 - Inference provider integration via `adapters/inference-provider`.
 - RevenueCat integration via `adapters/revenuecat` and mobile billing bridge.
+- Platform subscription systems (App Store/Google Play) for purchase, renewal, restore, and subscription management handoff.
 
 **Data Flow:**
 - User submits media from mobile -> backend validates/authenticates -> upload metadata persisted -> async job queued -> worker calls inference provider -> result stored -> job status updated -> mobile polls/receives push -> preview/export.
+- User opens paywall -> mobile requests products/offerings -> purchase or restore via store flow -> billing event received/validated -> dedupe + entitlement evaluation -> credit grant ledger write + balance update -> mobile entitlement/credit refresh.
 
 ### File Organization Patterns
 
@@ -603,7 +628,7 @@ The project tree and boundaries map cleanly to architectural responsibilities, w
 All major feature domains from the PRD are mapped to concrete mobile/backend modules and integration points, including creation flow, validation/recovery, trust/safety, support, notifications, and analytics instrumentation.
 
 **Functional Requirements Coverage:**
-FR1-FR28 are architecturally supported through defined modules, API contracts, event/state patterns, and required test organization.
+FR1-FR38 are architecturally supported through defined modules, API contracts, event/state patterns, and required test organization.
 
 **Non-Functional Requirements Coverage:**
 Performance, reliability, security/privacy, scalability, accessibility, and compliance requirements are addressed via queue-driven processing, deterministic error taxonomy, auth/guard boundaries, observability, and policy-oriented moderation architecture.

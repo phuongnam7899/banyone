@@ -5,7 +5,17 @@ import { Platform } from "react-native";
 export function resolveBanyoneBackendBaseUrl(): string {
   const fromEnv = process.env.EXPO_PUBLIC_BACKEND_URL;
   if (typeof fromEnv === "string" && fromEnv.trim().length > 0) {
-    return fromEnv.replace(/\/+$/, "");
+    let url = fromEnv.replace(/\/+$/, "");
+    // Android emulator: localhost/127.0.0.1 point at the emulator, not the dev machine.
+    if (
+      Platform.OS === "android" &&
+      /(^|\/\/)(localhost|127\.0\.0\.1)(:|\/|$)/i.test(url)
+    ) {
+      url = url
+        .replace(/\/\/localhost/i, "//10.0.2.2")
+        .replace(/\/\/127\.0\.0\.1/i, "//10.0.2.2");
+    }
+    return url;
   }
   if (Platform.OS === "android") return "http://10.0.2.2:3000";
   return "http://localhost:3000";

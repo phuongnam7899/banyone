@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import * as path from 'path';
+import { Inject, Injectable } from '@nestjs/common';
+import type { Firestore } from 'firebase-admin/firestore';
+import { FIRESTORE } from '../../infra/firestore.module';
 
 /**
  * MVP: JSON file under `BANYONE_NOTIFICATIONS_DATA_DIR` (or `.banyone-notifications-data`).
@@ -7,107 +8,50 @@ import * as path from 'path';
  * without changing `PushTokensController` contracts.
  */
 
-type PersistedPushTokensStore = {
-  version: 1;
-  /** userId -> distinct FCM registration tokens */
-  tokensByUserId: Record<string, string[]>;
-};
-
+@Injectable()
 export class PushTokensStore {
-  private readonly storeDir: string;
-  private readonly storeFilePath: string;
-  private store: PersistedPushTokensStore;
+  private readonly cache = new Map<string, string[]>();
+  constructor(@Inject(FIRESTORE) private readonly firestore: Firestore) {}
 
-  constructor() {
-    const configuredDir = process.env.BANYONE_NOTIFICATIONS_DATA_DIR;
-    this.storeDir =
-      configuredDir ?? path.join(process.cwd(), '.banyone-notifications-data');
-    this.storeFilePath = path.join(this.storeDir, 'push-tokens.json');
-    mkdirSync(this.storeDir, { recursive: true });
-    this.store = this.loadStore();
-  }
-
-  private loadStore(): PersistedPushTokensStore {
-    if (!existsSync(this.storeFilePath)) {
-      return { version: 1, tokensByUserId: {} };
-    }
-    try {
-      const raw = readFileSync(this.storeFilePath, { encoding: 'utf-8' });
-      const parsed = JSON.parse(raw) as unknown;
-      return this.normalize(parsed);
-    } catch {
-      return { version: 1, tokensByUserId: {} };
-    }
-  }
-
-  private normalize(parsed: unknown): PersistedPushTokensStore {
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !('tokensByUserId' in parsed)
-    ) {
-      return { version: 1, tokensByUserId: {} };
-    }
-    const o = parsed as { tokensByUserId?: unknown };
-    if (
-      typeof o.tokensByUserId !== 'object' ||
-      o.tokensByUserId === null ||
-      Array.isArray(o.tokensByUserId)
-    ) {
-      return { version: 1, tokensByUserId: {} };
-    }
-    const out: Record<string, string[]> = {};
-    for (const [userId, tokensUnknown] of Object.entries(o.tokensByUserId)) {
-      if (!Array.isArray(tokensUnknown)) continue;
-      const tokens = tokensUnknown.filter(
-        (t): t is string => typeof t === 'string' && t.trim().length > 0,
-      );
-      const uniq = [...new Set(tokens)];
-      if (uniq.length > 0) out[userId] = uniq;
-    }
-    return { version: 1, tokensByUserId: out };
-  }
-
-  private saveStore(): void {
-    writeFileSync(
-      this.storeFilePath,
-      `${JSON.stringify(this.store, null, 2)}\n`,
-      { encoding: 'utf-8' },
-    );
+  private parseTokens(value: unknown): string[] {
+    if (typeof value !== 'object' || value === null) return [];
+    const tokens = (value as { tokens?: unknown }).tokens;
+    if (!Array.isArray(tokens)) return [];
+    return [...new Set(tokens.filter((t): t is string => typeof t === 'string'))];
   }
 
   upsertToken(userId: string, fcmToken: string): void {
     const token = fcmToken.trim();
     if (!token) return;
-    const existing = this.store.tokensByUserId[userId] ?? [];
-    if (!existing.includes(token)) {
-      this.store.tokensByUserId[userId] = [...existing, token];
-    }
-    this.saveStore();
+    const existing = this.cache.get(userId) ?? [];
+    const next = existing.includes(token) ? existing : [...existing, token];
+    this.cache.set(userId, next);
+    void this.firestore.collection('push_tokens').doc(userId).set({ userId, tokens: next }, { merge: true });
   }
 
   /**
    * Removes one token for user, or all tokens when `fcmToken` omitted (sign-out).
    */
   removeToken(userId: string, fcmToken?: string): void {
-    const list = this.store.tokensByUserId[userId];
+    const list = this.cache.get(userId) ?? [];
     if (!list?.length) return;
     if (!fcmToken || !fcmToken.trim()) {
-      delete this.store.tokensByUserId[userId];
-      this.saveStore();
+      this.cache.delete(userId);
+      void this.firestore.collection('push_tokens').doc(userId).delete();
       return;
     }
     const token = fcmToken.trim();
     const next = list.filter((t) => t !== token);
     if (next.length === 0) {
-      delete this.store.tokensByUserId[userId];
-    } else {
-      this.store.tokensByUserId[userId] = next;
+      this.cache.delete(userId);
+      void this.firestore.collection('push_tokens').doc(userId).delete();
+      return;
     }
-    this.saveStore();
+    this.cache.set(userId, next);
+    void this.firestore.collection('push_tokens').doc(userId).set({ userId, tokens: next }, { merge: true });
   }
 
   getTokensForUser(userId: string): string[] {
-    return [...(this.store.tokensByUserId[userId] ?? [])];
+    return [...(this.cache.get(userId) ?? [])];
   }
 }

@@ -38,6 +38,14 @@ export type GenerationJobStatusPayload = {
    */
   updatedAt: string;
   /**
+   * Segmentation dimension for metrics (Story 5.2); persisted on create.
+   */
+  qualityTier?: number;
+  /**
+   * Server-computed time-to-preview when `status === 'ready'` and timestamps allow; omitted otherwise.
+   */
+  timeToPreviewMs?: number;
+  /**
    * Optional bounded ETA for user-facing timeline copy.
    * Only provided for non-final states.
    */
@@ -54,10 +62,20 @@ export type GenerationJobStatusEnvelope =
   | GenerationJobStatusSuccessEnvelope
   | GenerationJobErrorEnvelope;
 
+export type GenerationJobCreditsPayload = {
+  balance: number;
+  videoCreditPerSecond: number;
+};
+
+export type GenerationJobCreditsEnvelope =
+  | { data: GenerationJobCreditsPayload; error: null }
+  | GenerationJobErrorEnvelope;
+
 export type GenerationJobHistoryListItem = {
   jobId: string;
   status: GenerationJobStatus;
   updatedAt: string;
+  sourceImageUrl?: string;
 };
 
 export type GenerationJobHistoryListPayload = {

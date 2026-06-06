@@ -14,10 +14,14 @@ stepsCompleted:
   - step-10-nonfunctional
   - step-11-polish
   - step-12-complete
+  - step-e-01-discovery
+  - step-e-02-review
+  - step-e-03-edit
 inputDocuments:
   - _bmad-output/planning-artifacts/product-brief-banyone-2026-03-22.md
   - _bmad-output/brainstorming/brainstorming-session-2026-03-22-100809.md
 workflowType: prd
+workflow: edit
 documentCounts:
   productBriefs: 1
   research: 0
@@ -29,6 +33,10 @@ classification:
   complexity: medium
   projectContext: greenfield
 completedAt: 2026-03-22
+lastEdited: 2026-05-31
+editHistory:
+  - date: 2026-05-31
+    changes: Added Phase 1 auto-renewable subscription (iOS + Android), user journeys, FRs, NFRs, and store billing compliance aligned with Banyone Pro paywall flow
 ---
 
 # Product Requirements Document - banyone
@@ -42,7 +50,7 @@ completedAt: 2026-03-22
 
 ### What Makes This Special
 
-The product differentiates on usable power: few taps from inputs to believable output, without requiring AI prompting expertise or pro editing skills. Its core insight is that AI demand is broad, but usability is the bottleneck; reducing cognitive load unlocks wider adoption. The value proposition is clear: users can replace a video's character with a target character from a reference image in a few simple steps while keeping the original motion and scene. This simplicity is paired with cost-aware quality defaults, enabling acceptable output quality and more sustainable operating economics under constrained budget conditions.
+The product differentiates on usable power: few taps from inputs to believable output, without requiring AI prompting expertise or pro editing skills. Its core insight is that AI demand is broad, but usability is the bottleneck; reducing cognitive load unlocks wider adoption. The value proposition is clear: users can replace a video's character with a target character from a reference image in a few simple steps while keeping the original motion and scene. This simplicity is paired with cost-aware quality defaults and a credit-based **Banyone Pro** auto-renewable subscription that tops up generation credits on each billing period, enabling acceptable output quality and sustainable operating economics under constrained budget conditions.
 
 ## Project Classification
 
@@ -59,7 +67,7 @@ Users can complete their first full job (upload video, upload reference image, s
 
 ### Business Success
 
-In the first 3 months, success means proving demand and usability with healthy first-export conversion, while keeping cost per completed export controlled under a constrained budget. In 12 months, success means sustainable economics with repeat usage from users who reached first export, plus a validated monetization path (credits/subscription or hybrid) that supports model and operations cost.
+In the first 3 months, success means proving demand and usability with healthy first-export conversion, while keeping cost per completed export controlled under a constrained budget. In 12 months, success means sustainable economics with repeat usage from users who reached first export, plus a validated **Banyone Pro** subscription path where renewal credit grants cover model and operations cost at target gross margin.
 
 ### Technical Success
 
@@ -72,6 +80,9 @@ The system reliably completes jobs within published constraints (single source v
 - Export completion reliability: at least 95% of accepted jobs complete without manual support.
 - D7 retention (among users with first export): at least 20%.
 - Unit economics gate: measured per-job COGS with a target gross margin path of at least 40% before paid scale-up.
+- Paywall-to-subscription conversion: at least 8% of users who open the paywall complete an initial subscription within the same session.
+- Credit top-up reliability: at least 99% of successful initial purchases and renewals result in a credited balance within 60 seconds.
+- Billing support load: billing-related support tickets remain below 5% of total tickets in the first 90 days post-launch.
 
 ## Product Scope
 
@@ -82,13 +93,14 @@ The system reliably completes jobs within published constraints (single source v
 - Explicit input/output limits (duration, format, resolution tiers) with cost-aware default quality.
 - Backend job orchestration: queue, storage, inference integration, status updates, and deterministic error handling.
 - Baseline trust layer: content policy UX, abuse/rate controls, and app-store-compliant synthetic-media safeguards.
+- **Banyone Pro subscription billing (iOS App Store + Google Play):** auto-renewable weekly, monthly, and yearly plans that grant generation credits on initial purchase and each renewal; paywall access from creation flow; subscription status and renewal credit visibility; platform subscription management entry points.
 
 ### Growth Features (Post-MVP)
 
 - Higher quality and faster processing tiers with clear tradeoff controls.
 - Better creative controls (hints, masks, quality tuning) without breaking simplicity.
 - Improved onboarding and re-engagement loops to increase repeat exports and D7/D30 retention.
-- Monetization optimization (credits packaging, subscription experiments, pricing localization).
+- Subscription packaging optimization (pricing experiments, plan merchandising, regional pricing localization).
 
 ### Vision (Future)
 
@@ -114,6 +126,14 @@ An is responsible for keeping the platform safe and store-compliant with limited
 
 Trang receives tickets from users who report "my video failed" or "result quality is poor." She looks up job history, sees the specific failure category, and uses pre-defined response playbooks (limits, retry guidance, refund/credit rules). If the issue is systemic, she escalates with diagnostic context rather than vague reports. The resolution is fast, consistent support that recovers frustrated users and reduces churn after first failure.
 
+### Journey 5 - Subscribe to Continue Creating (Casual Creator: Linh, Insufficient Credits)
+
+Linh tries to generate a video but her generation credit balance is too low. The app blocks submission with a clear insufficient-credits message and a path to the paywall. On the paywall she sees three **Banyone Pro** plans (weekly, monthly, yearly) with price and credits granted per billing period. She subscribes through the platform store purchase sheet or the hosted subscription options view. After purchase completes, her credit balance updates and she returns to create her job without losing her prior selections. On each renewal, credits are added automatically so she can keep creating without repeating the purchase flow.
+
+### Journey 6 - Manage Active Subscription (Returning Creator: Minh, Pro Subscriber)
+
+Minh already has an active **Banyone Pro** subscription. He opens the paywall from the credits badge and sees his current plan, the credits scheduled for the next renewal, and options to change or cancel. He changes plan through platform subscription management (in-app customer center when available, otherwise App Store or Google Play settings). When he returns to the app, subscription state and credit balance reflect the updated entitlement. If he reinstalls on a new device, he can restore his prior subscription and regain access to renewal credit grants.
+
 ### Journey Requirements Summary
 
 These journeys require the following capability areas:
@@ -124,6 +144,7 @@ These journeys require the following capability areas:
 - **Trust and Safety Operations:** moderation tooling, abuse detection signals, rate limiting, and policy action workflows.
 - **Supportability:** searchable job diagnostics, support playbooks, and escalation hooks.
 - **Retention Hooks:** quick first-win moments, re-use prompts, and consistent output reliability.
+- **Monetization and Credits:** credit balance visibility, paywall entry from creation flow, subscription purchase and renewal credit grants, active-plan management, and purchase restoration.
 
 ## Domain-Specific Requirements
 
@@ -133,6 +154,15 @@ These journeys require the following capability areas:
 - Terms, consent disclosures, and prohibited-use policies must be presented before first job submission.
 - User reporting and takedown workflows must exist for policy-violating outputs.
 - Regional privacy obligations (for example GDPR-like expectations where applicable) must be addressed through transparent data handling notices and deletion controls.
+
+### In-App Purchase & Store Billing Compliance
+
+- Auto-renewable subscription products must comply with Apple App Store and Google Play billing policies, including clear disclosure of price, billing period, and renewal terms before purchase.
+- Users must be able to restore prior subscription purchases after reinstall or device change.
+- Subscription management (change plan, cancel, view billing history) must route through platform-provided subscription management surfaces.
+- Refunds and billing disputes are handled per Apple and Google policies; the app must not promise in-app refunds outside store mechanisms.
+- iOS and Android must offer feature parity on core subscription flows: view plans, purchase, view active plan, and access subscription management.
+- Subscription entitlement must map to the same user account used for generation credit balance and job history.
 
 ### Technical Constraints
 
@@ -146,6 +176,7 @@ These journeys require the following capability areas:
 - Integration with a video generation/inference provider (WAN 2.2-class or equivalent) must support asynchronous job execution and status polling.
 - Integration with cloud object storage must support secure upload, temporary processing assets, and controlled output retrieval.
 - Integration with mobile-native share/export surfaces is required for the primary user outcome.
+- Integration with platform in-app purchase and subscription services (iOS App Store and Google Play) must support purchase, renewal, entitlement verification, and server-side credit grant on billing events.
 
 ### Risk Mitigations
 
@@ -218,6 +249,10 @@ These journeys require the following capability areas:
 
 - Include in-product disclosures for synthetic media behavior and prohibited use cases.
 - Maintain review-ready evidence of moderation and abuse handling for store submissions.
+- Configure auto-renewable subscription products in App Store Connect and Google Play Console with localized store pricing where available.
+- Present subscription terms (price, period, renewal behavior) in the paywall before purchase completion.
+- Link billing identity to the server credit account so purchase and renewal events credit the correct user.
+- Refresh subscription entitlement when the app returns to foreground after external plan changes in store settings.
 
 ### Implementation Considerations
 
@@ -237,6 +272,8 @@ These journeys require the following capability areas:
 **Core User Journeys Supported:**
 - Primary user success path (first export).
 - Primary user edge-case recovery (input constraint failures).
+- Subscribe to continue creating (insufficient credits).
+- Manage active subscription (plan change, cancel, restore).
 - Support and moderation operational handling.
 
 **Must-Have Capabilities:**
@@ -245,13 +282,14 @@ These journeys require the following capability areas:
 - Clear constraints and guided error recovery.
 - Baseline moderation, abuse throttling, and policy disclosures.
 - Core analytics for funnel, latency, failures, and COGS.
+- **Banyone Pro auto-renewable subscription (iOS + Android):** weekly, monthly, and yearly plans; paywall from creation flow; platform store purchase; credit grant on initial purchase and renewal; active-plan and next-renewal visibility; subscription management and restore purchases.
 
 ### Post-MVP Features
 
 **Phase 2 (Post-MVP):**
 - Quality/speed tier controls.
 - Better creative guidance and refinement controls.
-- Monetization experiments and pricing optimization.
+- Subscription packaging and pricing optimization (experiments, merchandising, localization).
 - Retention loops and creator-oriented repeat workflows.
 
 **Phase 3 (Expansion):**
@@ -316,6 +354,19 @@ These journeys require the following capability areas:
 - FR27: Product teams can measure per-job cost signals needed for unit economics decisions.
 - FR28: Product teams can compare outcomes across quality tiers to guide pricing and default settings.
 
+### Monetization and Subscription
+
+- FR29: Users can view their remaining generation credit balance before submitting a job.
+- FR30: Users can open a paywall to subscribe when credits are insufficient or when proactively adding credits from the creation flow.
+- FR31: Users can choose among weekly, monthly, and yearly auto-renewable **Banyone Pro** subscription plans with visible price and credits granted per billing period.
+- FR32: Users can complete subscription purchase through the platform store on iOS and Android.
+- FR33: Users receive generation credits automatically after initial subscription purchase and after each successful subscription renewal.
+- FR34: Users can view their active subscription plan and the credits scheduled for the next renewal period.
+- FR35: Users can change or cancel their subscription through platform subscription management surfaces.
+- FR36: Users can restore prior subscription purchases after reinstall or on a new device.
+- FR37: Support users can view subscription-linked credit grant history for a user account.
+- FR38: The system can reject duplicate credit grants for the same billing event.
+
 ## Non-Functional Requirements
 
 ### Performance
@@ -351,3 +402,10 @@ These journeys require the following capability areas:
 
 - The system shall tolerate temporary inference-provider unavailability and return actionable retry messaging.
 - The system shall validate upstream and downstream media format compatibility before expensive processing starts.
+
+### Billing and Subscription Reliability
+
+- The system shall reflect successful subscription purchase or renewal in the user's credit balance within 60 seconds for 95th percentile of billing events, measured from store confirmation through client refresh.
+- The system shall process each billable store event at most once for credit grants, with 100% idempotent handling of duplicate billing notifications.
+- The mobile app shall present a recoverable error with retry when subscription options fail to load, without blocking unrelated app features.
+- The mobile app shall refresh subscription entitlement within 5 seconds of returning to foreground after an external plan change in store settings for 95th percentile of sessions.

@@ -5,14 +5,24 @@ import {
   signInWithCredential,
   type User,
 } from "firebase/auth";
+import Constants from "expo-constants";
 import * as Google from "expo-auth-session/providers/google";
 import * as WebBrowser from "expo-web-browser";
 import React from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet } from "react-native";
 
+import { ThemedText } from "@/components/themed-text";
+import { ThemedView } from "@/components/themed-view";
+import { Radius, Spacing } from "@/constants/theme";
+import { useTheme } from "@/hooks/use-theme";
 import { getBanyoneFirebaseAuth } from "@/infra/firebase/firebase-client";
 
 WebBrowser.maybeCompleteAuthSession();
+
+function readDevFirebaseIdTokenFromEnv(): string | null {
+  const raw = process.env.EXPO_PUBLIC_DEV_FIREBASE_ID_TOKEN;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+}
 
 export type BanyoneAuthContextValue = {
   isReady: boolean;
@@ -41,15 +51,44 @@ function useGoogleSignInEnabled(): boolean {
 }
 
 function SessionLoading() {
+  const theme = useTheme();
   return (
-    <View style={styles.center} accessibilityLabel="Restoring session">
-      <ActivityIndicator />
-      <Text style={styles.hint}>Signing you in…</Text>
-    </View>
+    <ThemedView style={styles.center} accessibilityLabel="Restoring session">
+      <ActivityIndicator color={theme.primary} />
+      <ThemedText type="small" themeColor="textSecondary">
+        Signing you in…
+      </ThemedText>
+    </ThemedView>
+  );
+}
+
+function MissingClientAuthConfig() {
+  return (
+    <ThemedView style={styles.center} accessibilityLabel="Missing auth configuration">
+      <ThemedText type="defaultSemiBold">Auth is not configured for this build</ThemedText>
+      <ThemedText type="small" themeColor="textSecondary" style={styles.centeredText}>
+        Add Firebase web config (EXPO_PUBLIC_FIREBASE_*) or set
+        EXPO_PUBLIC_DEV_FIREBASE_ID_TOKEN for local dev against
+        BANYONE_AUTH_VERIFIER=test. See apps/mobile/.env.example.
+      </ThemedText>
+    </ThemedView>
+  );
+}
+
+function AuthInitializationFailed({ message }: { message: string }) {
+  return (
+    <ThemedView style={styles.center} accessibilityLabel="Sign-in failed">
+      <ThemedText type="defaultSemiBold">Could not start a session</ThemedText>
+      <ThemedText type="small" themeColor="textSecondary" style={styles.centeredText}>
+        {message}
+      </ThemedText>
+    </ThemedView>
   );
 }
 
 function GoogleAuthGate() {
+  const theme = useTheme();
+  const isExpoGo = Constants.appOwnership === "expo";
   const webClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? "";
   const iosClientId = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
   const androidClientId = process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
@@ -90,22 +129,35 @@ function GoogleAuthGate() {
   }, [response, auth]);
 
   return (
-    <View style={styles.center}>
-      <Text style={styles.title}>Sign in to continue</Text>
+    <ThemedView style={styles.center}>
+      <ThemedText type="screenTitle" style={styles.title}>
+        Sign in to continue
+      </ThemedText>
+      {isExpoGo ? (
+        <ThemedText type="small" themeColor="textSecondary" style={styles.oauthHint}>
+          Google Sign-In does not work in Expo Go: OAuth needs a stable app redirect, but Expo Go
+          uses an {"exp://"} URL that Google rejects. Use a development build (expo-dev-client) or a
+          release build, then add the redirect URI {"com.banyone:/oauthredirect"} to your Google
+          Cloud OAuth client for this app.
+        </ThemedText>
+      ) : null}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Continue with Google"
-        disabled={!request}
+        disabled={!request || isExpoGo}
         onPress={() => void promptAsync()}
         style={({ pressed }) => [
           styles.googleButton,
           pressed ? styles.googleButtonPressed : null,
           !request ? styles.googleButtonDisabled : null,
+          { backgroundColor: theme.brandPrimary },
         ]}
       >
-        <Text style={styles.googleButtonLabel}>Continue with Google</Text>
+        <ThemedText type="smallBold" style={[styles.googleButtonLabel, { color: theme.onBrandPrimary }]}>
+          Continue with Google
+        </ThemedText>
       </Pressable>
-    </View>
+    </ThemedView>
   );
 }
 
@@ -125,10 +177,15 @@ export function BanyoneAuthProvider({
 
   const googleEnabled = useGoogleSignInEnabled();
   const auth = getBanyoneFirebaseAuth();
+  const authRef = React.useRef(auth);
+  authRef.current = auth;
+
+  const devFirebaseIdTokenFromEnv = React.useMemo(() => readDevFirebaseIdTokenFromEnv(), []);
 
   const getIdToken = React.useCallback(async (forceRefresh = false) => {
     if (devTokenRef.current) return devTokenRef.current;
-    const u = userRef.current;
+    const authInstance = authRef.current;
+    const u = userRef.current ?? authInstance?.currentUser ?? null;
     if (!u) return null;
     return u.getIdToken(forceRefresh);
   }, []);
@@ -232,6 +289,22 @@ export function BanyoneAuthProvider({
     );
   }
 
+  if (!auth && !devFirebaseIdTokenFromEnv) {
+    return (
+      <BanyoneAuthContext.Provider value={value}>
+        <MissingClientAuthConfig />
+      </BanyoneAuthContext.Provider>
+    );
+  }
+
+  if (auth && !googleEnabled && !uid && lastError) {
+    return (
+      <BanyoneAuthContext.Provider value={value}>
+        <AuthInitializationFailed message={lastError.message} />
+      </BanyoneAuthContext.Provider>
+    );
+  }
+
   if (auth && googleEnabled && needsGoogleSignIn) {
     return (
       <BanyoneAuthContext.Provider value={value}>
@@ -260,24 +333,26 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 24,
-    gap: 12,
+    padding: Spacing.four,
+    gap: Spacing.three,
   },
-  hint: {
-    marginTop: 8,
-    fontSize: 14,
-    opacity: 0.8,
+  centeredText: {
+    textAlign: "center",
+  },
+  oauthHint: {
+    marginBottom: Spacing.three,
+    lineHeight: 18,
+    textAlign: "center",
+    paddingHorizontal: Spacing.two,
   },
   title: {
-    fontSize: 18,
-    fontWeight: "600",
-    marginBottom: 8,
+    marginBottom: Spacing.one,
+    textAlign: "center",
   },
   googleButton: {
     paddingVertical: 12,
     paddingHorizontal: 20,
-    borderRadius: 8,
-    backgroundColor: "#1a73e8",
+    borderRadius: Radius.md,
   },
   googleButtonPressed: {
     opacity: 0.85,
@@ -286,8 +361,6 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   googleButtonLabel: {
-    color: "#fff",
     fontSize: 16,
-    fontWeight: "600",
   },
 });

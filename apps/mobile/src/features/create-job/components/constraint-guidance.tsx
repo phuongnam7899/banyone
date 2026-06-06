@@ -3,7 +3,7 @@ import React from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Radius, Spacing } from '@/constants/theme';
 
 type Props = {
   colorScheme: 'light' | 'dark';
@@ -16,18 +16,20 @@ export function ConstraintGuidance({ colorScheme }: Props) {
 
   return (
     <View
-      style={[styles.card, { backgroundColor: colors.infoSurface, borderColor: colors.onInfoSurface }]}
+      style={[styles.card, { backgroundColor: colors.infoSurface, borderColor: colors.borderMuted }]}
       accessible
       accessibilityLabel={a11ySummary}
       testID="create-job.requirements.section">
       <View style={styles.cardHeader}>
-        <ThemedText
-          type="small"
-          style={[styles.headerIcon, { color: colors.onInfoSurface }]}
-          accessibilityElementsHidden
-          importantForAccessibility="no">
-          i
-        </ThemedText>
+        <View style={[styles.headerIconWrap, { backgroundColor: colors.primaryMuted }]}>
+          <ThemedText
+            type="smallBold"
+            style={{ color: colors.primary }}
+            accessibilityElementsHidden
+            importantForAccessibility="no">
+            i
+          </ThemedText>
+        </View>
         <ThemedText type="defaultSemiBold" style={{ color: colors.onInfoSurface }}>
           Requirements
         </ThemedText>
@@ -58,23 +60,22 @@ export function ConstraintGuidance({ colorScheme }: Props) {
 const styles = StyleSheet.create({
   card: {
     alignSelf: 'stretch',
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-    padding: Spacing.three,
-    gap: Spacing.two,
+    borderRadius: Radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.four,
+    gap: Spacing.three,
   },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.two,
+    gap: Spacing.three,
   },
-  headerIcon: {
-    width: 22,
-    height: 22,
-    textAlign: 'center',
-    fontWeight: '700',
-    borderRadius: 11,
-    overflow: 'hidden',
+  headerIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: Radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   row: {
     flexDirection: 'row',

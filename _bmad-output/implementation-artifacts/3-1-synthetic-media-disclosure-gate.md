@@ -1,6 +1,6 @@
 # Story 3.1: Synthetic Media Disclosure Gate
 
-Status: review
+Status: dones
 
 ## Story
 

@@ -40,9 +40,14 @@ export function mimeTypeFromExtension(ext: string | null): string | null {
   }
 }
 
-export function durationSecFromAssetDuration(durationMs: number | null | undefined): number | null {
-  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs <= 0) {
+export function durationSecFromAssetDuration(durationRaw: number | null | undefined): number | null {
+  if (typeof durationRaw !== 'number' || !Number.isFinite(durationRaw) || durationRaw <= 0) {
     return null;
   }
-  return durationMs / 1000;
+  // Expo runtimes may report either seconds or milliseconds.
+  // A duration greater than 1000 is almost certainly milliseconds for this flow.
+  if (durationRaw > 1_000) {
+    return durationRaw / 1000;
+  }
+  return durationRaw;
 }

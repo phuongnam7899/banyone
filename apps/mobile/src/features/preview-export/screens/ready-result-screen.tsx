@@ -6,8 +6,9 @@ import type { JobStatusPayload } from '@/features/job-status/types/job-status';
 type Props = {
   jobStatus: JobStatusPayload;
   colorScheme: 'light' | 'dark';
+  embedded?: boolean;
 };
 
-export function ReadyResultScreen({ jobStatus, colorScheme }: Props) {
-  return <PreviewExportPanel jobStatus={jobStatus} colorScheme={colorScheme} />;
+export function ReadyResultScreen({ jobStatus, colorScheme, embedded = false }: Props) {
+  return <PreviewExportPanel jobStatus={jobStatus} colorScheme={colorScheme} embedded={embedded} />;
 }

@@ -8,6 +8,8 @@ export type ThemedTextProps = TextProps & {
     | 'default'
     | 'defaultSemiBold'
     | 'title'
+    | 'screenTitle'
+    | 'overline'
     | 'small'
     | 'smallBold'
     | 'subtitle'
@@ -19,14 +21,17 @@ export type ThemedTextProps = TextProps & {
 
 export function ThemedText({ style, type = 'default', themeColor, ...rest }: ThemedTextProps) {
   const theme = useTheme();
+  const resolvedThemeColor = themeColor ?? (type === 'linkPrimary' ? 'linkPrimary' : 'text');
 
   return (
     <Text
       style={[
-        { color: theme[themeColor ?? 'text'] },
+        { color: theme[resolvedThemeColor] },
         type === 'default' && styles.default,
         type === 'defaultSemiBold' && styles.defaultSemiBold,
         type === 'title' && styles.title,
+        type === 'screenTitle' && styles.screenTitle,
+        type === 'overline' && styles.overline,
         type === 'small' && styles.small,
         type === 'smallBold' && styles.smallBold,
         type === 'subtitle' && styles.subtitle,
@@ -66,6 +71,19 @@ const styles = StyleSheet.create({
     fontWeight: 600,
     lineHeight: 52,
   },
+  screenTitle: {
+    fontSize: 28,
+    fontWeight: '800',
+    lineHeight: 34,
+    letterSpacing: -0.6,
+  },
+  overline: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
   subtitle: {
     fontSize: 32,
     lineHeight: 44,
@@ -78,7 +96,6 @@ const styles = StyleSheet.create({
   linkPrimary: {
     lineHeight: 30,
     fontSize: 14,
-    color: '#3c87f7',
   },
   code: {
     fontFamily: Fonts.mono,

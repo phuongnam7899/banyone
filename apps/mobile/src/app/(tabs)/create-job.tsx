@@ -1,7 +1,7 @@
 import React from 'react';
-import { useColorScheme } from 'react-native';
 
 import { CreateJobScreen } from '@/features/create-job/screens/create-job-screen';
+import { useColorScheme } from '@/hooks/use-color-scheme';
 
 export default function CreateJobRoute() {
   const scheme = useColorScheme();

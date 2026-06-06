@@ -1,15 +1,19 @@
 import React from 'react';
 import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
-import type { PreviewExportEvent } from '@banyone/contracts';
+
+import { DEFAULT_QUALITY_TIER, type PreviewExportEventName } from '@banyone/contracts';
 
 import { useBanyoneAuth } from '@/features/auth/auth-context';
+import { emitJobExperienceMetrics, emitPreviewExportTelemetry } from '@/infra/telemetry';
 
 import { createReadyExport, fetchReadyPreview } from '../services/preview-export-api';
 import type { PreviewPayload, PreviewStage } from '../types/preview-export';
 
 function mapErrorCopy(code: string): string {
   switch (code) {
+    case 'ABUSE_RESTRICTION_ACTIVE':
+      return 'This account is currently restricted from preview/export actions.';
     case 'RATE_LIMITED':
       return 'This action is temporarily limited. Please wait and try again.';
     case 'PREVIEW_LOAD_FAILED':
@@ -37,12 +41,39 @@ type HookState = {
   errorMessage: string | null;
 };
 
-function emitPreviewExportEvent(event: PreviewExportEvent): void {
-  console.info(`telemetry.${event.event}.v1`, event);
-}
-
-export function usePreviewExport(jobId: string | null, status: 'queued' | 'processing' | 'ready' | 'failed' | null) {
+export function usePreviewExport(
+  jobId: string | null,
+  status: 'queued' | 'processing' | 'ready' | 'failed' | null,
+  options?: {
+    qualityTier?: number;
+    serverTimeToPreviewMs?: number | null;
+  },
+) {
+  const qualityTier = options?.qualityTier ?? DEFAULT_QUALITY_TIER;
+  const serverTtp = options?.serverTimeToPreviewMs;
   const { getIdToken } = useBanyoneAuth();
+
+  const trackPreviewExport = React.useCallback(
+    (event: PreviewExportEventName, code?: string) => {
+      if (!jobId) return;
+      emitPreviewExportTelemetry({
+        event,
+        funnelStage: 'preview_export',
+        jobId,
+        qualityTier,
+        ...(code ? { code } : {}),
+      });
+      emitJobExperienceMetrics({
+        metricKind: 'preview_export_step',
+        jobId,
+        qualityTier,
+        previewExportEvent: event,
+        ...(serverTtp !== undefined ? { serverTimeToPreviewMs: serverTtp } : {}),
+      });
+    },
+    [jobId, qualityTier, serverTtp],
+  );
+
   const [state, setState] = React.useState<HookState>({
     stage: 'loading',
     preview: null,
@@ -67,7 +98,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
           errorCode: null,
           errorMessage: null,
         }));
-        emitPreviewExportEvent({ event: 'preview_viewed', jobId });
+        trackPreviewExport('preview_viewed');
         return;
       }
 
@@ -76,7 +107,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
         stage: 'failed-preview',
         errorCode: result.error.code,
         errorMessage:
-          result.error.code === 'RATE_LIMITED'
+          result.error.code === 'RATE_LIMITED' || result.error.code === 'ABUSE_RESTRICTION_ACTIVE'
             ? result.error.message
             : mapErrorCopy(result.error.code),
       }));
@@ -88,7 +119,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
         errorMessage: mapErrorCopy('NETWORK_ERROR'),
       }));
     }
-  }, [getIdToken, jobId, status]);
+  }, [getIdToken, jobId, status, trackPreviewExport]);
 
   React.useEffect(() => {
     if (!jobId || status !== 'ready') return;
@@ -98,7 +129,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
   const exportToLibrary = React.useCallback(async () => {
     if (!jobId) return;
     setState((prev) => ({ ...prev, isExporting: true, errorCode: null, errorMessage: null }));
-    emitPreviewExportEvent({ event: 'export_started', jobId });
+    trackPreviewExport('export_started');
 
     try {
       const result = await createReadyExport(jobId, getIdToken);
@@ -108,11 +139,11 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
           isExporting: false,
           errorCode: result.error.code,
           errorMessage:
-            result.error.code === 'RATE_LIMITED'
+            result.error.code === 'RATE_LIMITED' || result.error.code === 'ABUSE_RESTRICTION_ACTIVE'
               ? result.error.message
               : mapErrorCopy(result.error.code),
         }));
-        emitPreviewExportEvent({ event: 'export_failed', jobId, code: result.error.code });
+        trackPreviewExport('export_failed', result.error.code);
         return;
       }
 
@@ -124,7 +155,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
           errorCode: 'MEDIA_LIBRARY_PERMISSION_DENIED',
           errorMessage: mapErrorCopy('MEDIA_LIBRARY_PERMISSION_DENIED'),
         }));
-        emitPreviewExportEvent({ event: 'export_failed', jobId, code: 'MEDIA_LIBRARY_PERMISSION_DENIED' });
+        trackPreviewExport('export_failed', 'MEDIA_LIBRARY_PERMISSION_DENIED');
         return;
       }
 
@@ -135,7 +166,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
           errorCode: 'EXPORT_LOCAL_URI_REQUIRED',
           errorMessage: mapErrorCopy('EXPORT_LOCAL_URI_REQUIRED'),
         }));
-        emitPreviewExportEvent({ event: 'export_failed', jobId, code: 'EXPORT_LOCAL_URI_REQUIRED' });
+        trackPreviewExport('export_failed', 'EXPORT_LOCAL_URI_REQUIRED');
         return;
       }
 
@@ -147,7 +178,7 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
         errorCode: null,
         errorMessage: null,
       }));
-      emitPreviewExportEvent({ event: 'export_succeeded', jobId });
+      trackPreviewExport('export_succeeded');
     } catch {
       setState((prev) => ({
         ...prev,
@@ -155,14 +186,14 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
         errorCode: 'NETWORK_ERROR',
         errorMessage: mapErrorCopy('NETWORK_ERROR'),
       }));
-      emitPreviewExportEvent({ event: 'export_failed', jobId, code: 'NETWORK_ERROR' });
+      trackPreviewExport('export_failed', 'NETWORK_ERROR');
     }
-  }, [getIdToken, jobId]);
+  }, [getIdToken, jobId, trackPreviewExport]);
 
   const shareExported = React.useCallback(async () => {
     if (!jobId || !state.exportedFileUri) return;
     setState((prev) => ({ ...prev, isSharing: true, errorCode: null, errorMessage: null }));
-    emitPreviewExportEvent({ event: 'share_opened', jobId });
+    trackPreviewExport('share_opened');
 
     try {
       const available = await Sharing.isAvailableAsync();
@@ -180,12 +211,12 @@ export function usePreviewExport(jobId: string | null, status: 'queued' | 'proce
         mimeType: 'video/mp4',
       });
       setState((prev) => ({ ...prev, isSharing: false }));
-      emitPreviewExportEvent({ event: 'share_completed', jobId });
+      trackPreviewExport('share_completed');
     } catch {
       setState((prev) => ({ ...prev, isSharing: false }));
-      emitPreviewExportEvent({ event: 'share_dismissed', jobId });
+      trackPreviewExport('share_dismissed');
     }
-  }, [jobId, state.exportedFileUri]);
+  }, [jobId, state.exportedFileUri, trackPreviewExport]);
 
   return {
     ...state,

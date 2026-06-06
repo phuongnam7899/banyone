@@ -1,0 +1,1760 @@
+diff --git a/apps/mobile/src/features/create-job/hooks/use-job-submission.ts b/apps/mobile/src/features/create-job/hooks/use-job-submission.ts
+index 1f68f7c..a051e43 100644
+--- a/apps/mobile/src/features/create-job/hooks/use-job-submission.ts
++++ b/apps/mobile/src/features/create-job/hooks/use-job-submission.ts
+@@ -1,7 +1,12 @@
+-import type { CreateJobDraftTelemetryEvent } from "@banyone/contracts";
+ import {
++  ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
+   API_RATE_LIMIT_ERROR_CODE,
++  DEFAULT_QUALITY_TIER,
++  INSUFFICIENT_CREDIT_ERROR_CODE,
++  POLICY_VIOLATION_ERROR_CODE,
+   isApiRateLimitDetails,
++  isInsufficientCreditDetails,
++  isJobPolicyViolationDetails,
+ } from "@banyone/contracts";
+ import React from "react";
+ import { Platform } from "react-native";
+@@ -10,6 +15,7 @@ import { useBanyoneAuth } from "@/features/auth/auth-context";
+ import type { CreateGenerationJobRequestBody } from "@/features/create-job/types/create-generation-job";
+ import { banyoneAuthenticatedFetch } from "@/infra/api-client/authenticated-fetch";
+ import { parseBanyoneApiEnvelopeResponse } from "@/infra/api-client/parse-json-envelope";
++import { emitCreateJobDraftTelemetry, emitFunnelTelemetry } from "@/infra/telemetry";
+ 
+ type ViolationDetail = {
+   code: string;
+@@ -53,11 +59,38 @@ type SubmitDisclosureRequiredAck = {
+   traceId: string;
+ };
+ 
++type SubmitPolicyBlockedAck = {
++  type: "policy-blocked";
++  policyCode: string;
++  message: string;
++  guidance: string;
++  traceId: string;
++};
++
++type SubmitAbuseRestrictedAck = {
++  type: "abuse-restricted";
++  message: string;
++  traceId: string;
++};
++
++type SubmitInsufficientCreditAck = {
++  type: "insufficient-credit";
++  message: string;
++  traceId: string;
++  balance: number;
++  required: number;
++  shortfall: number;
++  videoCreditPerSecond: number;
++};
++
+ type SubmitAck =
+   | SubmitAcceptedAck
+   | SubmitRejectedAck
+   | SubmitRateLimitedAck
+-  | SubmitDisclosureRequiredAck;
++  | SubmitDisclosureRequiredAck
++  | SubmitPolicyBlockedAck
++  | SubmitAbuseRestrictedAck
++  | SubmitInsufficientCreditAck;
+ 
+ export type UseJobSubmissionOptions = {
+   initialIdempotencyKey?: string | null;
+@@ -75,15 +108,55 @@ function resolveApiBaseUrl(): string {
+ 
+ const API_BASE_URL = resolveApiBaseUrl();
+ const ENDPOINT_PATH = "/v1/generation-jobs";
++const ASSET_UPLOAD_PATH = "/v1/generation-jobs/assets";
+ const DISCLOSURE_ACK_PATH = "/v1/synthetic-media-disclosure/acknowledge";
++const MEDIA_UPLOAD_ENABLED =
++  process.env.EXPO_PUBLIC_ENABLE_MEDIA_UPLOAD === "true";
+ const DISCLOSURE_REQUIRED_ERROR_CODE = "DISCLOSURE_REQUIRED";
+ 
++const POLICY_BLOCKED_GUIDANCE: Record<string, string> = {
++  STORAGE_URI_BLOCKED:
++    "Choose a different video or image file. If this keeps happening, contact support and share the trace ID below.",
++};
++
++function policyGuidanceForCode(policyCode: string): string {
++  return POLICY_BLOCKED_GUIDANCE[policyCode] ?? POLICY_BLOCKED_GUIDANCE.STORAGE_URI_BLOCKED;
++}
++
+ function generateIdempotencyKey(): string {
+   return `idem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+ }
+ 
+-function emitDraftTelemetry(event: CreateJobDraftTelemetryEvent): void {
+-  console.info(`telemetry.${event.event}.v1`, event);
++/** React Native native multipart file shape (not supported in browser FormData). */
++function appendNativeUploadFilePart(
++  formData: FormData,
++  uri: string,
++  fileName: string,
++  mimeType: string,
++): void {
++  formData.append("file", {
++    uri,
++    name: fileName,
++    type: mimeType,
++  } as unknown as Blob);
++}
++
++/** Web: read picker URI (e.g. blob:) into a Blob so Multer receives real bytes. */
++async function appendWebUploadFilePart(
++  formData: FormData,
++  uri: string,
++  fileName: string,
++  mimeType: string,
++  signal: AbortSignal,
++): Promise<void> {
++  const res = await fetch(uri, { signal });
++  if (!res.ok) {
++    throw new Error("ASSET_UPLOAD_FAILED");
++  }
++  const raw = await res.blob();
++  const body =
++    mimeType.trim().length > 0 ? new Blob([raw], { type: mimeType }) : raw;
++  formData.append("file", body, fileName);
+ }
+ 
+ export function useJobSubmission(
+@@ -135,8 +208,6 @@ export function useJobSubmission(
+     if (isSubmittingRef.current) return;
+     isSubmittingRef.current = true;
+ 
+-    const startedAt = Date.now();
+-
+     const hadNetworkFailure = hadNetworkFailureSinceLastTerminalAckRef.current;
+     const existingKey = idempotencyKeyRef.current;
+     const idempotencyKey = existingKey ?? generateIdempotencyKey();
+@@ -144,8 +215,9 @@ export function useJobSubmission(
+     if (!existingKey) {
+       onPendingIdempotencyKeyChange?.(idempotencyKey);
+     } else if (hadNetworkFailure) {
+-      emitDraftTelemetry({
++      emitCreateJobDraftTelemetry({
+         event: "create_job_submit_retry_after_failure",
++        funnelStage: "submit_result",
+         hasVideo: Boolean(input.video.uri),
+         hasImage: Boolean(input.image.uri),
+         hadPendingIdempotencyKey: true,
+@@ -169,6 +241,71 @@ export function useJobSubmission(
+     };
+ 
+     try {
++      const uploadIfNeeded = async (
++        slot: "video" | "image",
++        uri: string | null,
++        mimeType: string | null,
++      ): Promise<string | null> => {
++        if (!uri) return null;
++        if (/^https?:\/\//i.test(uri)) return uri;
++        if (!MEDIA_UPLOAD_ENABLED) return uri;
++        const fileName = uri.split("/").pop() ?? `${slot}-${Date.now()}`;
++        const resolvedMime =
++          mimeType?.trim() && mimeType.includes("/")
++            ? mimeType.trim()
++            : slot === "video"
++              ? "video/mp4"
++              : "image/jpeg";
++        const formData = new FormData();
++        formData.append("slot", slot);
++        if (Platform.OS === "web") {
++          await appendWebUploadFilePart(
++            formData,
++            uri,
++            fileName,
++            resolvedMime,
++            abortController.signal,
++          );
++        } else {
++          appendNativeUploadFilePart(formData, uri, fileName, resolvedMime);
++        }
++        const uploadRes = await banyoneAuthenticatedFetch(
++          `${API_BASE_URL}${ASSET_UPLOAD_PATH}`,
++          {
++            method: "POST",
++            body: formData,
++            signal: abortController.signal,
++          },
++          getIdToken,
++        );
++        const uploaded = await parseBanyoneApiEnvelopeResponse(uploadRes);
++        if (!uploaded.ok || uploaded.envelope.error !== null || !uploadRes.ok) {
++          throw new Error("ASSET_UPLOAD_FAILED");
++        }
++        const payload = uploaded.envelope.data as { assetUrl: string };
++        return payload.assetUrl;
++      };
++      const uploadedVideoUri = await uploadIfNeeded(
++        "video",
++        input.video.uri,
++        input.video.mimeType,
++      );
++      const uploadedImageUri = await uploadIfNeeded(
++        "image",
++        input.image.uri,
++        input.image.mimeType,
++      );
++      const requestBody: CreateGenerationJobRequestBody = {
++        ...input,
++        video: {
++          ...input.video,
++          uri: uploadedVideoUri,
++        },
++        image: {
++          ...input.image,
++          uri: uploadedImageUri,
++        },
++      };
+       const res = await banyoneAuthenticatedFetch(
+         `${API_BASE_URL}${ENDPOINT_PATH}`,
+         {
+@@ -177,7 +314,7 @@ export function useJobSubmission(
+             "Content-Type": "application/json",
+             "x-banyone-idempotency-key": idempotencyKey,
+           },
+-          body: JSON.stringify(input),
++          body: JSON.stringify(requestBody),
+           signal: abortController.signal,
+         },
+         getIdToken,
+@@ -210,9 +347,10 @@ export function useJobSubmission(
+             retryAfterSec: d?.retryAfterSec ?? null,
+             traceId: err.traceId ?? "",
+           });
+-          console.info("telemetry.jobs.generation.acknowledged.v1", {
+-            outcome: "rate_limited",
+-            clientAckLatencyMs: Date.now() - startedAt,
++          emitFunnelTelemetry({
++            funnelStage: "submit_result",
++            submissionOutcomeClass: "rate_limited",
++            eventName: "submit_result",
+           });
+           return;
+         }
+@@ -228,6 +366,69 @@ export function useJobSubmission(
+             currentVersion,
+             traceId: err.traceId ?? "",
+           });
++          emitFunnelTelemetry({
++            funnelStage: "disclosure_presented",
++            submissionOutcomeClass: "disclosure_required",
++            eventName: "disclosure_presented",
++          });
++          return;
++        }
++
++        if (err.code === POLICY_VIOLATION_ERROR_CODE) {
++          const details = isJobPolicyViolationDetails(err.details) ? err.details : null;
++          const policyCode = details?.policyCode ?? "STORAGE_URI_BLOCKED";
++          setAck({
++            type: "policy-blocked",
++            policyCode,
++            message: err.message,
++            guidance: policyGuidanceForCode(policyCode),
++            traceId: err.traceId ?? "",
++          });
++          emitFunnelTelemetry({
++            funnelStage: "submit_result",
++            submissionOutcomeClass: "policy_blocked",
++            eventName: "submit_result",
++            code: policyCode,
++          });
++          return;
++        }
++
++        if (err.code === ABUSE_RESTRICTION_ACTIVE_ERROR_CODE) {
++          setAck({
++            type: "abuse-restricted",
++            message: err.message,
++            traceId: err.traceId ?? "",
++          });
++          emitFunnelTelemetry({
++            funnelStage: "submit_result",
++            submissionOutcomeClass: "abuse_restricted",
++            eventName: "submit_result",
++          });
++          return;
++        }
++
++        if (
++          err.code === INSUFFICIENT_CREDIT_ERROR_CODE ||
++          err.code === "INSUFFICIENT_CREDIT"
++        ) {
++          const details = isInsufficientCreditDetails(err.details)
++            ? err.details
++            : null;
++          setAck({
++            type: "insufficient-credit",
++            message: err.message,
++            traceId: err.traceId ?? "",
++            balance: details?.balance ?? 0,
++            required: details?.required ?? 0,
++            shortfall: details?.shortfall ?? 0,
++            videoCreditPerSecond: details?.videoCreditPerSecond ?? 0,
++          });
++          emitFunnelTelemetry({
++            funnelStage: "submit_result",
++            submissionOutcomeClass: "validation_rejected",
++            eventName: "submit_result",
++            code: INSUFFICIENT_CREDIT_ERROR_CODE,
++          });
+           return;
+         }
+ 
+@@ -242,10 +443,11 @@ export function useJobSubmission(
+           violations,
+         });
+ 
+-        console.info("telemetry.jobs.generation.acknowledged.v1", {
+-          outcome: "rejected",
+-          rejectionCodes: violations.map((v) => v.code),
+-          clientAckLatencyMs: Date.now() - startedAt,
++        emitFunnelTelemetry({
++          funnelStage: "submit_result",
++          submissionOutcomeClass: "validation_rejected",
++          eventName: "submit_result",
++          code: violations[0]?.code,
+         });
+         return;
+       }
+@@ -270,12 +472,13 @@ export function useJobSubmission(
+         jobId: data.jobId,
+         status: data.status,
+       });
+-
+-      console.info("telemetry.jobs.generation.acknowledged.v1", {
+-        outcome: "accepted",
++      emitFunnelTelemetry({
++        funnelStage: "submit_result",
++        submissionOutcomeClass: "accepted",
++        terminalJobStatusClass: "queued",
++        eventName: "submit_result",
+         jobId: data.jobId,
+-        status: data.status,
+-        clientAckLatencyMs: Date.now() - startedAt,
++        qualityTier: requestBody.qualityTier ?? DEFAULT_QUALITY_TIER,
+       });
+     } catch (caught) {
+       if (
+@@ -289,6 +492,12 @@ export function useJobSubmission(
+           traceId: "",
+           violations: [],
+         });
++        emitFunnelTelemetry({
++          funnelStage: "submit_result",
++          submissionOutcomeClass: "validation_rejected",
++          eventName: "submit_result",
++          code: "UNAUTHENTICATED",
++        });
+       } else {
+         hadNetworkFailureSinceLastTerminalAckRef.current = true;
+         setAck({
+@@ -297,6 +506,11 @@ export function useJobSubmission(
+           traceId: "",
+           violations: [],
+         });
++        emitFunnelTelemetry({
++          funnelStage: "submit_result",
++          submissionOutcomeClass: "network_error",
++          eventName: "submit_result",
++        });
+       }
+     } finally {
+       finishSubmittingUi();
+@@ -318,7 +532,14 @@ export function useJobSubmission(
+       );
+       const parsed = await parseBanyoneApiEnvelopeResponse(res);
+       if (!parsed.ok) return false;
+-      return parsed.envelope.error === null;
++      if (parsed.envelope.error === null) {
++        emitFunnelTelemetry({
++          funnelStage: "disclosure_acknowledged",
++          eventName: "disclosure_acknowledged",
++        });
++        return true;
++      }
++      return false;
+     },
+     [getIdToken],
+   );
+diff --git a/apps/mobile/src/features/create-job/screens/create-job-screen.tsx b/apps/mobile/src/features/create-job/screens/create-job-screen.tsx
+index 6266dc9..27b0ae5 100644
+--- a/apps/mobile/src/features/create-job/screens/create-job-screen.tsx
++++ b/apps/mobile/src/features/create-job/screens/create-job-screen.tsx
+@@ -1,26 +1,43 @@
+-import React from 'react';
+-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+-import { SafeAreaView } from 'react-native-safe-area-context';
++import { useRouter } from "expo-router";
++import React from "react";
++import { Pressable, ScrollView, StyleSheet, View } from "react-native";
++import { SafeAreaView } from "react-native-safe-area-context";
+ 
+-import { ThemedText } from '@/components/themed-text';
+-import { ThemedView } from '@/components/themed-view';
+-import { BottomTabInset, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
+-import { ConstraintGuidance } from '@/features/create-job/components/constraint-guidance';
+-import { MediaSlotPicker } from '@/features/create-job/components/media-slot-picker';
+-import { InputComplianceChecker } from '@/features/create-job/components/input-compliance-checker';
+-import { useJobInputSelection } from '@/features/create-job/hooks/use-job-input-selection';
+-import { useJobSubmission } from '@/features/create-job/hooks/use-job-submission';
+-import { JobStatusTimeline } from '@/features/job-status/components/job-status-timeline';
+-import { useJobStatusPolling } from '@/features/job-status/hooks/use-job-status-polling';
+-import { ReadyResultScreen } from '@/features/preview-export/screens/ready-result-screen';
+-import { validateJobInputCompliance } from '@banyone/contracts';
++import {
++  FormSection,
++  ScreenHeader,
++  SectionCard,
++} from "@/components/ui/screen-shell";
++import { ThemedText } from "@/components/themed-text";
++import { ThemedView } from "@/components/themed-view";
++import {
++  BottomTabInset,
++  Colors,
++  MaxContentWidth,
++  Radius,
++  Spacing,
++} from "@/constants/theme";
++import { MediaSlotPicker } from "@/features/create-job/components/media-slot-picker";
++import { useJobInputSelection } from "@/features/create-job/hooks/use-job-input-selection";
++import { useGenerationCredits } from "@/features/create-job/hooks/use-generation-credits";
++import { useJobSubmission } from "@/features/create-job/hooks/use-job-submission";
++import { JobStatusTimeline } from "@/features/job-status/components/job-status-timeline";
++import { useJobStatusPolling } from "@/features/job-status/hooks/use-job-status-polling";
++import { ReadyResultScreen } from "@/features/preview-export/screens/ready-result-screen";
++import {
++  DEFAULT_QUALITY_TIER,
++  validateJobInputCompliance,
++} from "@banyone/contracts";
+ 
+ type Props = {
+-  colorScheme: 'light' | 'dark';
++  colorScheme: "light" | "dark";
+ };
+ 
+ export function CreateJobScreen({ colorScheme }: Props) {
+   const colors = Colors[colorScheme];
++  const router = useRouter();
++  const scrollViewRef = React.useRef<ScrollView | null>(null);
++  const hasAutoScrolledToStatusRef = React.useRef(false);
+   const {
+     state,
+     pickVideo,
+@@ -37,6 +54,7 @@ export function CreateJobScreen({ colorScheme }: Props) {
+ 
+   const createGenerationJobBody = React.useMemo(
+     () => ({
++      qualityTier: DEFAULT_QUALITY_TIER,
+       video: {
+         uri: state.videoUri,
+         durationSec: state.videoDurationSec,
+@@ -72,18 +90,45 @@ export function CreateJobScreen({ colorScheme }: Props) {
+     [pendingIdempotencyKey, setPendingIdempotencyKey],
+   );
+ 
+-  const { isSubmittingJob, ack, submit, acknowledgeDisclosure } = useJobSubmission(
+-    createGenerationJobBody,
+-    jobSubmissionOptions,
+-  );
+-  const [isAcknowledgingDisclosure, setIsAcknowledgingDisclosure] = React.useState(false);
++  const { isSubmittingJob, ack, submit, acknowledgeDisclosure } =
++    useJobSubmission(createGenerationJobBody, jobSubmissionOptions);
++  const { credits, isLoadingCredits, creditsError } = useGenerationCredits();
++  const [isAcknowledgingDisclosure, setIsAcknowledgingDisclosure] =
++    React.useState(false);
++  const handledDisclosureTraceRef = React.useRef<string | null>(null);
+ 
+   React.useEffect(() => {
+-    if (ack?.type === 'accepted') {
++    if (ack?.type === "accepted") {
+       void clearPersistedDraftAfterAcceptedJob();
+     }
+   }, [ack, clearPersistedDraftAfterAcceptedJob]);
+ 
++  React.useEffect(() => {
++    if (ack?.type !== "disclosure-required") return;
++    if (handledDisclosureTraceRef.current === ack.traceId) return;
++    handledDisclosureTraceRef.current = ack.traceId;
++    let cancelled = false;
++    void (async () => {
++      setIsAcknowledgingDisclosure(true);
++      const acknowledged = await acknowledgeDisclosure(ack.currentVersion);
++      if (!cancelled) {
++        setIsAcknowledgingDisclosure(false);
++        if (acknowledged) {
++          await submit();
++        }
++      }
++    })();
++    return () => {
++      cancelled = true;
++    };
++  }, [ack, acknowledgeDisclosure, submit]);
++
++  React.useEffect(() => {
++    if (ack?.type !== "disclosure-required") {
++      handledDisclosureTraceRef.current = null;
++    }
++  }, [ack]);
++
+   const validation = React.useMemo(() => {
+     return validateJobInputCompliance({
+       video: {
+@@ -112,48 +157,153 @@ export function CreateJobScreen({ colorScheme }: Props) {
+     state.imageMimeType,
+   ]);
+ 
+-  const acceptedJobId = ack?.type === 'accepted' ? ack.jobId : null;
++  const acceptedJobId = ack?.type === "accepted" ? ack.jobId : null;
+   const initialJobStatus =
+-    acceptedJobId && ack?.type === 'accepted'
+-      ? { jobId: ack.jobId, status: ack.status, updatedAt: new Date().toISOString() }
++    acceptedJobId && ack?.type === "accepted"
++      ? {
++          jobId: ack.jobId,
++          status: ack.status,
++          updatedAt: new Date().toISOString(),
++        }
+       : null;
+ 
+   const { status: polledJobStatus, isRefreshingStatus } = useJobStatusPolling(
+     acceptedJobId,
+     initialJobStatus,
+   );
++  const shouldShowStatusTimeline = isSubmittingJob || ack?.type === "accepted";
++  const timelineJobId = acceptedJobId ?? "pending";
++  const timelineStatus = polledJobStatus?.status ?? "queued";
++  const timelineEtaSeconds = polledJobStatus?.etaSeconds;
++  const timelineFailure = polledJobStatus?.failure;
++  const videoCreditPerSecond = credits?.videoCreditPerSecond ?? null;
++  const creditsNeeded = React.useMemo(() => {
++    if (videoCreditPerSecond == null || state.videoDurationSec == null) return null;
++    if (!Number.isFinite(state.videoDurationSec) || state.videoDurationSec <= 0)
++      return null;
++    return Math.ceil(state.videoDurationSec * videoCreditPerSecond);
++  }, [state.videoDurationSec, videoCreditPerSecond]);
++  const generateButtonLabel = isRestoringDraft
++    ? "Loading draftâ€¦"
++    : isSubmittingJob
++      ? "Submittingâ€¦"
++      : isAcknowledgingDisclosure
++        ? "Acknowledgingâ€¦"
++        : creditsNeeded != null
++          ? `Generate (${creditsNeeded.toLocaleString()} credits)`
++          : "Generate";
++  const creditBadgeText = isLoadingCredits
++    ? "Credits: â€¦"
++    : credits
++      ? `Credits: ${credits.balance.toLocaleString()}`
++      : "Credits: â€”";
++  const creditRateText =
++    videoCreditPerSecond != null
++      ? `Rate: ${videoCreditPerSecond.toLocaleString()} credits/sec`
++      : "Rate: â€”";
++
++  React.useEffect(() => {
++    if (!shouldShowStatusTimeline) {
++      hasAutoScrolledToStatusRef.current = false;
++    }
++  }, [shouldShowStatusTimeline]);
+ 
+   return (
+     <ThemedView style={styles.container} testID="create-job.screen">
+-      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
++      <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
++        <View style={styles.headerSticky}>
++          <ScreenHeader
++            title="Create"
++            subtitle=""
++            rightSlot={
++              <View style={styles.creditsRightSlot}>
++                <View
++                  testID="create-job.credits.badge"
++                  style={[
++                    styles.creditBadge,
++                    {
++                      borderColor: colors.borderMuted,
++                      backgroundColor: colors.backgroundElementMuted,
++                    },
++                  ]}
++                >
++                  <ThemedText type="small" style={{ color: colors.text }}>
++                    {creditBadgeText}
++                  </ThemedText>
++                  <ThemedText
++                    testID="create-job.credits.rate"
++                    type="small"
++                    style={{ color: colors.textSecondary }}
++                  >
++                    {creditRateText}
++                  </ThemedText>
++                </View>
++                <Pressable
++                  testID="create-job.credits.add-button"
++                  accessibilityRole="button"
++                  accessibilityLabel="Add credits"
++                  onPress={() => {
++                    router.push("/paywall");
++                  }}
++                  style={({ pressed }) => [
++                    styles.addCreditsButton,
++                    {
++                      borderColor: colors.borderMuted,
++                      backgroundColor: pressed
++                        ? colors.backgroundSelected
++                        : colors.backgroundElementMuted,
++                    },
++                  ]}
++                >
++                  <ThemedText
++                    type="smallBold"
++                    style={[styles.addCreditsButtonLabel, { color: colors.primary }]}
++                  >
++                    +
++                  </ThemedText>
++                </Pressable>
++              </View>
++            }
++          />
++        </View>
+         <ScrollView
+-          contentContainerStyle={[styles.scrollContent, { paddingBottom: BottomTabInset + Spacing.four }]}
+-          keyboardShouldPersistTaps="handled">
+-          <View style={styles.header}>
+-            <ThemedText type="title" style={styles.title}>
+-              New creation
+-            </ThemedText>
+-            <ThemedText type="small" style={{ color: colors.textSecondary }}>
+-              Pick one source video and one reference image. Limits below match what we will validate before submit.
+-            </ThemedText>
+-          </View>
+-
++          ref={scrollViewRef}
++          contentContainerStyle={[
++            styles.scrollContent,
++            { paddingBottom: BottomTabInset + Spacing.four },
++          ]}
++          keyboardShouldPersistTaps="handled"
++        >
+           {isRestoringDraft ? (
+             <View
+               testID="create-job.draft-restoring.banner"
+               accessibilityRole="text"
+-              style={[styles.draftBanner, { borderColor: colors.textSecondary }]}>
++              style={[
++                styles.draftBanner,
++                {
++                  borderColor: colors.borderMuted,
++                  backgroundColor: colors.backgroundElementMuted,
++                },
++              ]}
++            >
+               <ThemedText type="small" style={{ color: colors.textSecondary }}>
+                 Restoring your draftâ€¦
+               </ThemedText>
+             </View>
+           ) : null}
+ 
+-          {!isRestoringDraft && draftRestoreNotice === 'restored' ? (
++          {!isRestoringDraft && draftRestoreNotice === "restored" ? (
+             <View
+               testID="create-job.draft-restored.banner"
+               accessibilityRole="text"
+-              style={[styles.draftBanner, { borderColor: colors.primary }]}>
++              style={[
++                styles.draftBanner,
++                {
++                  borderColor: colors.primary,
++                  backgroundColor: colors.infoSurface,
++                },
++              ]}
++            >
+               <ThemedText type="small" style={{ color: colors.text }}>
+                 Draft restored â€” your previous selections were kept.
+               </ThemedText>
+@@ -162,7 +312,8 @@ export function CreateJobScreen({ colorScheme }: Props) {
+                 accessibilityRole="button"
+                 accessibilityLabel="Dismiss draft restored message"
+                 onPress={dismissDraftNotice}
+-                style={styles.draftDismiss}>
++                style={styles.draftDismiss}
++              >
+                 <ThemedText type="small" style={{ color: colors.primary }}>
+                   Dismiss
+                 </ThemedText>
+@@ -170,20 +321,29 @@ export function CreateJobScreen({ colorScheme }: Props) {
+             </View>
+           ) : null}
+ 
+-          {!isRestoringDraft && draftRestoreNotice === 'corrupted' ? (
++          {!isRestoringDraft && draftRestoreNotice === "corrupted" ? (
+             <View
+               testID="create-job.draft-corrupted.banner"
+               accessibilityRole="text"
+-              style={[styles.draftBanner, { borderColor: colors.warningIcon }]}>
++              style={[
++                styles.draftBanner,
++                {
++                  borderColor: colors.warningIcon,
++                  backgroundColor: colors.dangerSurface,
++                },
++              ]}
++            >
+               <ThemedText type="small" style={{ color: colors.text }}>
+-                Your saved draft could not be loaded (files missing). Please pick media again.
++                Your saved draft could not be loaded (files missing). Please
++                pick media again.
+               </ThemedText>
+               <Pressable
+                 testID="create-job.draft-corrupted.dismiss"
+                 accessibilityRole="button"
+                 accessibilityLabel="Dismiss draft error message"
+                 onPress={dismissDraftNotice}
+-                style={styles.draftDismiss}>
++                style={styles.draftDismiss}
++              >
+                 <ThemedText type="small" style={{ color: colors.primary }}>
+                   OK
+                 </ThemedText>
+@@ -191,47 +351,46 @@ export function CreateJobScreen({ colorScheme }: Props) {
+             </View>
+           ) : null}
+ 
+-          <ConstraintGuidance colorScheme={colorScheme} />
++          {/* <ConstraintGuidance colorScheme={colorScheme} /> */}
+ 
+-          <MediaSlotPicker
+-            variant="video"
+-            colorScheme={colorScheme}
+-            label="Source video"
+-            helper="Choose a single video from your library. Replacing picks swaps the clip in this slot."
+-            uri={state.videoUri}
+-            displayName={state.videoLabel}
+-            testID="create-job.upload-video.button"
+-            accessibilityLabel="Choose source video from library"
+-            onPress={pickVideo}
+-            onClear={clearVideo}
+-          />
+-
+-          <MediaSlotPicker
+-            variant="image"
+-            colorScheme={colorScheme}
+-            label="Reference image"
+-            helper="Choose one still image. This slot only accepts photosâ€”not another video."
+-            uri={state.imageUri}
+-            displayName={state.imageLabel}
+-            testID="create-job.upload-image.button"
+-            accessibilityLabel="Choose reference image from library"
+-            onPress={pickImage}
+-            onClear={clearImage}
+-          />
++          <FormSection label="">
++            <MediaSlotPicker
++              variant="video"
++              colorScheme={colorScheme}
++              label="Source video"
++              helper="The character in this video will be swapped"
++              uri={state.videoUri}
++              videoDurationSec={state.videoDurationSec}
++              displayName={state.videoLabel}
++              testID="create-job.upload-video.button"
++              accessibilityLabel="Choose source video from library"
++              onPress={pickVideo}
++              onClear={clearVideo}
++              validationResult={validation.video}
++            />
+ 
+-          <InputComplianceChecker
+-            colorScheme={colorScheme}
+-            video={validation.video}
+-            image={validation.image}
+-            onPickVideo={pickVideo}
+-            onPickImage={pickImage}
+-          />
++            <MediaSlotPicker
++              variant="image"
++              colorScheme={colorScheme}
++              label="Reference character image"
++              helper="The character in this image will be swapped with the character in the source video"
++              uri={state.imageUri}
++              displayName={state.imageLabel}
++              testID="create-job.upload-image.button"
++              accessibilityLabel="Choose reference image from library"
++              onPress={pickImage}
++              onClear={clearImage}
++              validationResult={validation.image}
++            />
++          </FormSection>
+ 
+           <Pressable
+             testID="create-job.submit.button"
+             accessibilityRole="button"
+-            accessibilityLabel="Submit"
+-            disabled={isSubmittingJob || isRestoringDraft || isAcknowledgingDisclosure}
++            accessibilityLabel="Generate"
++            disabled={
++              isSubmittingJob || isRestoringDraft || isAcknowledgingDisclosure
++            }
+             onPress={() => {
+               void submit();
+             }}
+@@ -240,96 +399,70 @@ export function CreateJobScreen({ colorScheme }: Props) {
+               {
+                 backgroundColor: colors.primary,
+                 opacity:
+-                  isSubmittingJob || isRestoringDraft || isAcknowledgingDisclosure
++                  isSubmittingJob ||
++                  isRestoringDraft ||
++                  isAcknowledgingDisclosure
+                     ? 0.6
+                     : pressed
+                       ? 0.85
+                       : 1,
+                 borderColor: colors.primary,
+               },
+-            ]}>
+-            <ThemedText type="small" style={{ color: colors.onPrimary }}>
+-              {isRestoringDraft
+-                ? 'Loading draftâ€¦'
+-                : isSubmittingJob
+-                  ? 'Submittingâ€¦'
+-                  : isAcknowledgingDisclosure
+-                    ? 'Acknowledgingâ€¦'
+-                    : 'Submit'}
++            ]}
++          >
++            <ThemedText type="smallBold" style={{ color: colors.onPrimary }}>
++              {generateButtonLabel}
+             </ThemedText>
+           </Pressable>
+ 
+-          {ack?.type === 'disclosure-required' ? (
++          {creditsError ? (
+             <View
+-              testID="create-job.disclosure-gate.container"
+-              style={[styles.disclosureGate, { borderColor: colors.textSecondary }]}
+-              accessibilityRole="alert">
++              testID="create-job.credits.error"
++              style={[
++                styles.ackRateLimited,
++                {
++                  borderColor: colors.warningIcon,
++                  backgroundColor: colors.dangerSurface,
++                },
++              ]}
++              accessibilityRole="alert"
++            >
+               <ThemedText type="small" style={{ color: colors.text }}>
+-                Before your first generation, you must acknowledge our synthetic-media disclosure.
+-              </ThemedText>
+-              <ThemedText type="small" style={{ color: colors.textSecondary }}>
+-                This confirms you understand acceptable use and platform expectations.
++                {creditsError}
+               </ThemedText>
+-              <Pressable
+-                testID="create-job.disclosure-gate.acknowledge.button"
+-                accessibilityRole="button"
+-                accessibilityLabel="Acknowledge synthetic media disclosure"
+-                disabled={isAcknowledgingDisclosure}
+-                onPress={() => {
+-                  void (async () => {
+-                    setIsAcknowledgingDisclosure(true);
+-                    const acknowledged = await acknowledgeDisclosure(ack.currentVersion);
+-                    setIsAcknowledgingDisclosure(false);
+-                    if (acknowledged) {
+-                      await submit();
+-                    }
+-                  })();
+-                }}
+-                style={({ pressed }) => [
+-                  styles.retryButton,
+-                  {
+-                    backgroundColor: colors.primary,
+-                    opacity: isAcknowledgingDisclosure ? 0.6 : pressed ? 0.85 : 1,
+-                    borderColor: colors.primary,
+-                  },
+-                ]}>
+-                <ThemedText type="small" style={{ color: colors.onPrimary }}>
+-                  {isAcknowledgingDisclosure ? 'Acknowledgingâ€¦' : 'I acknowledge and continue'}
+-                </ThemedText>
+-              </Pressable>
+             </View>
+           ) : null}
+ 
+-          {ack?.type === 'accepted' ? (
+-            <View style={{ gap: 12 }}>
+-              <View
+-                testID="create-job.submit.ack.accepted"
+-                style={styles.ackAccepted}
+-                accessibilityRole="text">
+-                <ThemedText type="small" style={{ color: colors.text }}>
+-                  Accepted
+-                </ThemedText>
+-                <ThemedText type="small" style={{ color: colors.textSecondary }}>
+-                  Job ID: {ack.jobId}
+-                </ThemedText>
+-              </View>
+-
+-              {polledJobStatus ? (
+-                <View style={{ marginTop: 0 }}>
+-                  <JobStatusTimeline
+-                    jobId={ack.jobId}
+-                    status={polledJobStatus.status}
+-                    etaSeconds={polledJobStatus.etaSeconds}
+-                    failure={polledJobStatus.failure}
++          {shouldShowStatusTimeline ? (
++            <View
++              style={styles.acceptedStack}
++              onLayout={(event) => {
++                if (hasAutoScrolledToStatusRef.current) return;
++                scrollViewRef.current?.scrollTo({
++                  y: Math.max(0, event.nativeEvent.layout.y - Spacing.three),
++                  animated: true,
++                });
++                hasAutoScrolledToStatusRef.current = true;
++              }}
++            >
++              <SectionCard>
++                <JobStatusTimeline
++                  jobId={timelineJobId}
++                  status={timelineStatus}
++                  etaSeconds={timelineEtaSeconds}
++                  failure={timelineFailure}
++                />
++                {polledJobStatus?.status === "ready" ? (
++                  <ReadyResultScreen
++                    jobStatus={polledJobStatus}
++                    colorScheme={colorScheme}
++                    embedded
+                   />
+-                </View>
+-              ) : null}
+-
+-              {polledJobStatus?.status === 'ready' ? (
+-                <ReadyResultScreen jobStatus={polledJobStatus} colorScheme={colorScheme} />
+-              ) : null}
++                ) : null}
++              </SectionCard>
+ 
+-              {polledJobStatus?.status === 'failed' && polledJobStatus.failure?.retryable ? (
++              {polledJobStatus?.status === "failed" &&
++              polledJobStatus.failure?.retryable ? (
+                 <Pressable
+                   testID="job-status.retry.button"
+                   accessibilityRole="button"
+@@ -342,24 +475,33 @@ export function CreateJobScreen({ colorScheme }: Props) {
+                     styles.retryButton,
+                     {
+                       backgroundColor: colors.primary,
+-                      opacity: isSubmittingJob || isRefreshingStatus ? 0.6 : pressed ? 0.85 : 1,
++                      opacity:
++                        isSubmittingJob || isRefreshingStatus
++                          ? 0.6
++                          : pressed
++                            ? 0.85
++                            : 1,
+                       borderColor: colors.primary,
+                     },
+-                  ]}>
++                  ]}
++                >
+                   <ThemedText type="small" style={{ color: colors.onPrimary }}>
+-                    {isRefreshingStatus ? 'Refreshingâ€¦' : 'Retry'}
++                    {isRefreshingStatus ? "Refreshingâ€¦" : "Retry"}
+                   </ThemedText>
+                 </Pressable>
+               ) : null}
+ 
+-              {polledJobStatus?.status === 'failed' &&
++              {polledJobStatus?.status === "failed" &&
+               polledJobStatus.failure &&
+               !polledJobStatus.failure.retryable ? (
+                 <View style={{ marginTop: 0 }}>
+                   <ThemedText type="small" style={{ color: colors.text }}>
+                     Failed. This error cannot be retried.
+                   </ThemedText>
+-                  <ThemedText type="small" style={{ color: colors.textSecondary }}>
++                  <ThemedText
++                    type="small"
++                    style={{ color: colors.textSecondary }}
++                  >
+                     Reason: {polledJobStatus.failure.reasonCode}
+                   </ThemedText>
+                 </View>
+@@ -367,12 +509,19 @@ export function CreateJobScreen({ colorScheme }: Props) {
+             </View>
+           ) : null}
+ 
+-          {ack?.type === 'rate-limited' ? (
++          {ack?.type === "rate-limited" ? (
+             <View
+               testID="create-job.submit.ack.rate-limited"
+-              style={[styles.ackRateLimited, { borderColor: colors.textSecondary }]}
++              style={[
++                styles.ackRateLimited,
++                {
++                  borderColor: colors.borderMuted,
++                  backgroundColor: colors.backgroundElementMuted,
++                },
++              ]}
+               accessibilityRole="alert"
+-              accessibilityLabel="Rate limited">
++              accessibilityLabel="Rate limited"
++            >
+               <ThemedText type="small" style={{ color: colors.text }}>
+                 Temporarily limited
+               </ThemedText>
+@@ -380,57 +529,213 @@ export function CreateJobScreen({ colorScheme }: Props) {
+                 testID="create-job.submit.ack.rate-limited.message"
+                 type="small"
+                 accessibilityRole="text"
+-                style={{ color: colors.textSecondary }}>
++                style={{ color: colors.textSecondary }}
++              >
+                 {ack.message}
+                 {ack.retryAfterSec != null
+                   ? ` You can try again in about ${ack.retryAfterSec} seconds.`
+-                  : ''}
++                  : ""}
++              </ThemedText>
++            </View>
++          ) : null}
++
++          {ack?.type === "policy-blocked" ? (
++            <View
++              testID="create-job.policy-blocked.container"
++              style={[
++                styles.ackPolicyBlocked,
++                {
++                  borderColor: colors.warningIcon,
++                  backgroundColor: colors.dangerSurface,
++                },
++              ]}
++              accessibilityRole="alert"
++              accessibilityLabel="Submission blocked by policy"
++            >
++              <ThemedText
++                testID="create-job.policy-blocked.title"
++                type="small"
++                style={{ color: colors.text }}
++              >
++                Cannot submit this media
++              </ThemedText>
++              <ThemedText
++                testID="create-job.policy-blocked.message"
++                type="small"
++                accessibilityRole="text"
++                style={{ color: colors.textSecondary }}
++              >
++                {ack.message}
++              </ThemedText>
++              <ThemedText
++                testID="create-job.policy-blocked.guidance"
++                type="small"
++                accessibilityRole="text"
++                style={{ color: colors.textSecondary }}
++              >
++                {ack.guidance}
++              </ThemedText>
++              <ThemedText
++                testID="create-job.policy-blocked.trace"
++                type="small"
++                accessibilityRole="text"
++                style={{ color: colors.textSecondary }}
++              >
++                Trace ID: {ack.traceId || "â€”"}
++              </ThemedText>
++              <ThemedText
++                testID="create-job.policy-blocked.code"
++                type="small"
++                accessibilityRole="text"
++                style={{ color: colors.textSecondary }}
++              >
++                Policy code: {ack.policyCode}
++              </ThemedText>
++            </View>
++          ) : null}
++
++          {ack?.type === "abuse-restricted" ? (
++            <View
++              testID="create-job.abuse-restricted.container"
++              style={[
++                styles.ackPolicyBlocked,
++                {
++                  borderColor: colors.warningIcon,
++                  backgroundColor: colors.dangerSurface,
++                },
++              ]}
++              accessibilityRole="alert"
++              accessibilityLabel="Submission blocked by abuse restriction"
++            >
++              <ThemedText
++                testID="create-job.abuse-restricted.title"
++                type="small"
++                style={{ color: colors.text }}
++              >
++                Submission temporarily unavailable
++              </ThemedText>
++              <ThemedText
++                testID="create-job.abuse-restricted.message"
++                type="small"
++                accessibilityRole="text"
++                style={{ color: colors.textSecondary }}
++              >
++                {ack.message}
++              </ThemedText>
++              <ThemedText
++                testID="create-job.abuse-restricted.guidance"
++                type="small"
++                accessibilityRole="text"
++                style={{ color: colors.textSecondary }}
++              >
++                If you believe this is a mistake, contact support and include
++                the trace ID.
++              </ThemedText>
++              <ThemedText
++                testID="create-job.abuse-restricted.trace"
++                type="small"
++                accessibilityRole="text"
++                style={{ color: colors.textSecondary }}
++              >
++                Trace ID: {ack.traceId || "â€”"}
++              </ThemedText>
++            </View>
++          ) : null}
++
++          {ack?.type === "insufficient-credit" ? (
++            <View
++              testID="create-job.insufficient-credit.container"
++              style={[
++                styles.ackPolicyBlocked,
++                {
++                  borderColor: colors.warningIcon,
++                  backgroundColor: colors.dangerSurface,
++                },
++              ]}
++              accessibilityRole="alert"
++              accessibilityLabel="Insufficient credits"
++            >
++              <ThemedText
++                testID="create-job.insufficient-credit.title"
++                type="small"
++                style={{ color: colors.text }}
++              >
++                Not enough credits
++              </ThemedText>
++              <ThemedText
++                testID="create-job.insufficient-credit.message"
++                type="small"
++                style={{ color: colors.textSecondary }}
++              >
++                {ack.message}
++              </ThemedText>
++              <ThemedText
++                testID="create-job.insufficient-credit.details"
++                type="small"
++                style={{ color: colors.textSecondary }}
++              >
++                Current: {ack.balance.toLocaleString()} | Required:{" "}
++                {ack.required.toLocaleString()} | Missing:{" "}
++                {ack.shortfall.toLocaleString()}
++              </ThemedText>
++              <ThemedText
++                testID="create-job.insufficient-credit.rate"
++                type="small"
++                style={{ color: colors.textSecondary }}
++              >
++                Cost rate: {ack.videoCreditPerSecond.toLocaleString()} credits/sec
+               </ThemedText>
+             </View>
+           ) : null}
+ 
+-          {ack?.type === 'rejected' ? (
+-            <View testID="create-job.submit.ack.rejected" style={styles.ackRejected} accessibilityRole="text">
++          {ack?.type === "rejected" ? (
++            <View
++              testID="create-job.submit.ack.rejected"
++              style={styles.ackRejected}
++              accessibilityRole="text"
++            >
+               <ThemedText type="small" style={{ color: colors.text }}>
+                 Rejected
+               </ThemedText>
+-              {ack.violations.length > 0
+-                ? ack.violations.map((v, idx) => (
+-                    <View key={`${v.code}.${idx}`}>
+-                      <ThemedText
+-                        testID={`create-job.submit.ack.rejection.reason.${v.code}.${idx}`}
+-                        type="small"
+-                        accessibilityRole="text"
+-                        style={{ color: colors.warningIcon }}>
+-                        {v.message}
+-                      </ThemedText>
+-                      <ThemedText
+-                        testID={`create-job.submit.ack.rejection.fix-action.${v.code}.${idx}`}
+-                        type="small"
+-                        accessibilityRole="text"
+-                        style={{ color: colors.textSecondary }}>
+-                        {v.fixAction}
+-                      </ThemedText>
+-                    </View>
+-                  ))
+-                : (
++              {ack.violations.length > 0 ? (
++                ack.violations.map((v, idx) => (
++                  <View key={`${v.code}.${idx}`}>
++                    <ThemedText
++                      testID={`create-job.submit.ack.rejection.reason.${v.code}.${idx}`}
++                      type="small"
++                      accessibilityRole="text"
++                      style={{ color: colors.warningIcon }}
++                    >
++                      {v.message}
++                    </ThemedText>
+                     <ThemedText
+-                      testID="create-job.submit.ack.rejected.code"
++                      testID={`create-job.submit.ack.rejection.fix-action.${v.code}.${idx}`}
+                       type="small"
+                       accessibilityRole="text"
+-                      style={{ color: colors.textSecondary }}>
+-                      {ack.code}
++                      style={{ color: colors.textSecondary }}
++                    >
++                      {v.fixAction}
+                     </ThemedText>
+-                  )}
++                  </View>
++                ))
++              ) : (
++                <ThemedText
++                  testID="create-job.submit.ack.rejected.code"
++                  type="small"
++                  accessibilityRole="text"
++                  style={{ color: colors.textSecondary }}
++                >
++                  {ack.code}
++                </ThemedText>
++              )}
+             </View>
+           ) : null}
+ 
+-          <View style={styles.footerNote} accessibilityRole="text">
++          {/* <View style={styles.footerNote} accessibilityRole="text">
+             <ThemedText type="small" style={{ color: colors.textSecondary }}>
+-              Submission and deep validation arrive in the next stories; here you will always see the same limits the
+-              validators will use.
++              Validators use the same limits shown here before your job runs.
+             </ThemedText>
+-          </View>
++          </View> */}
+         </ScrollView>
+       </SafeAreaView>
+     </ThemedView>
+@@ -444,81 +749,100 @@ const styles = StyleSheet.create({
+   safe: {
+     flex: 1,
+     maxWidth: MaxContentWidth,
+-    alignSelf: 'center',
+-    width: '100%',
++    alignSelf: "center",
++    width: "100%",
+   },
+   scrollContent: {
+     paddingHorizontal: Spacing.four,
+-    gap: Spacing.four,
+-    paddingTop: Spacing.three,
++    gap: Spacing.five,
++    paddingTop: Spacing.two,
++  },
++  headerSticky: {
++    paddingHorizontal: Spacing.four,
++    paddingTop: Spacing.four,
+   },
+-  header: {
++  creditsRightSlot: {
++    flexDirection: "row",
++    alignItems: "center",
+     gap: Spacing.two,
+   },
+-  title: {
+-    textAlign: 'left',
++  creditBadge: {
++    borderWidth: 1,
++    borderRadius: Radius.md,
++    paddingHorizontal: Spacing.two,
++    paddingVertical: Spacing.one,
++  },
++  addCreditsButton: {
++    borderWidth: 1,
++    borderRadius: Radius.full,
++    width: 32,
++    height: 32,
++    alignItems: "center",
++    justifyContent: "center",
++  },
++  addCreditsButtonLabel: {
++    fontSize: 18,
++    lineHeight: 20,
++    fontWeight: "700",
++  },
++  acceptedStack: {
++    gap: Spacing.three,
+   },
+   footerNote: {
+     marginTop: Spacing.two,
+   },
+   draftBanner: {
+-    alignSelf: 'stretch',
++    alignSelf: "stretch",
+     borderWidth: 1,
+-    borderRadius: Spacing.three,
++    borderRadius: Radius.md,
+     padding: Spacing.two,
+     gap: Spacing.two,
+   },
+   draftDismiss: {
+-    alignSelf: 'flex-start',
++    alignSelf: "flex-start",
+     paddingVertical: Spacing.one,
+   },
+   submitButton: {
+-    alignSelf: 'stretch',
+-    borderWidth: 1,
+-    borderRadius: Spacing.three,
+-    paddingHorizontal: Spacing.four,
+-    paddingVertical: Spacing.two,
+-    alignItems: 'center',
+-    justifyContent: 'center',
+-  },
+-  ackAccepted: {
+-    alignSelf: 'stretch',
+-    borderWidth: 1,
+-    borderRadius: Spacing.three,
+-    padding: Spacing.two,
+-    backgroundColor: 'transparent',
++    alignSelf: "stretch",
++    borderWidth: 0,
++    borderRadius: Radius.lg,
++    paddingHorizontal: Spacing.five,
++    paddingVertical: Spacing.three,
++    minHeight: 56,
++    alignItems: "center",
++    justifyContent: "center",
+   },
+   retryButton: {
+-    alignSelf: 'stretch',
++    alignSelf: "stretch",
+     borderWidth: 1,
+-    borderRadius: Spacing.three,
++    borderRadius: Radius.md,
+     paddingHorizontal: Spacing.four,
+     paddingVertical: Spacing.two,
+-    alignItems: 'center',
+-    justifyContent: 'center',
+-    marginTop: 12,
++    alignItems: "center",
++    justifyContent: "center",
++    marginTop: Spacing.three,
+   },
+   ackRejected: {
+-    alignSelf: 'stretch',
++    alignSelf: "stretch",
+     borderWidth: 1,
+-    borderRadius: Spacing.three,
++    borderRadius: Radius.md,
+     padding: Spacing.two,
+-    backgroundColor: 'transparent',
++    backgroundColor: "transparent",
+   },
+   ackRateLimited: {
+-    alignSelf: 'stretch',
++    alignSelf: "stretch",
+     borderWidth: 1,
+-    borderRadius: Spacing.three,
++    borderRadius: Radius.md,
+     padding: Spacing.two,
+     gap: Spacing.two,
+-    backgroundColor: 'transparent',
++    backgroundColor: "transparent",
+   },
+-  disclosureGate: {
+-    alignSelf: 'stretch',
++  ackPolicyBlocked: {
++    alignSelf: "stretch",
+     borderWidth: 1,
+-    borderRadius: Spacing.three,
++    borderRadius: Radius.md,
+     padding: Spacing.two,
+     gap: Spacing.two,
+-    backgroundColor: 'transparent',
++    backgroundColor: "transparent",
+   },
+ });
+diff --git a/apps/mobile/src/features/create-job/screens/create-job-submit.test.tsx b/apps/mobile/src/features/create-job/screens/create-job-submit.test.tsx
+index 4d3e4f8..35156f7 100644
+--- a/apps/mobile/src/features/create-job/screens/create-job-submit.test.tsx
++++ b/apps/mobile/src/features/create-job/screens/create-job-submit.test.tsx
+@@ -1,9 +1,17 @@
+ import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+ import React from 'react';
+ import { BANYONE_TEST_FIREBASE_ID_TOKEN } from '@banyone/contracts';
++import { emitCreateJobDraftTelemetry, emitFunnelTelemetry } from '@/infra/telemetry';
+ 
+ import { CreateJobScreen } from '@/features/create-job/screens/create-job-screen';
+ 
++jest.mock('@/infra/telemetry', () => ({
++  emitFunnelTelemetry: jest.fn(),
++  emitCreateJobDraftTelemetry: jest.fn(),
++  emitPreviewExportTelemetry: jest.fn(),
++  getTelemetrySessionId: jest.fn(() => 'test-session-id'),
++}));
++
+ function jsonFetchResponse(body: unknown, status = 200) {
+   const serialized = JSON.stringify(body);
+   return {
+@@ -16,13 +24,13 @@ function jsonFetchResponse(body: unknown, status = 200) {
+ jest.mock('@/features/create-job/hooks/use-job-input-selection', () => ({
+   useJobInputSelection: () => ({
+     state: {
+-      videoUri: 'file:///video.mp4',
++      videoUri: 'https://cdn.example.com/video.mp4',
+       videoLabel: 'video.mp4',
+       videoDurationSec: 60,
+       videoWidthPx: 1920,
+       videoHeightPx: 1080,
+       videoMimeType: 'video/mp4',
+-      imageUri: 'file:///image.jpg',
++      imageUri: 'https://cdn.example.com/image.jpg',
+       imageLabel: 'image.jpg',
+       imageWidthPx: 3000,
+       imageHeightPx: 3000,
+@@ -49,6 +57,15 @@ jest.mock('@/features/job-status/hooks/use-job-status-polling', () => ({
+   }),
+ }));
+ 
++jest.mock('@/features/create-job/hooks/use-generation-credits', () => ({
++  useGenerationCredits: () => ({
++    credits: { balance: 1234, videoCreditPerSecond: 100 },
++    isLoadingCredits: false,
++    creditsError: null,
++    refreshCredits: jest.fn(),
++  }),
++}));
++
+ const waitForOptions = { timeout: 15_000 };
+ jest.setTimeout(20_000);
+ 
+@@ -56,6 +73,8 @@ describe('CreateJobScreen submit + ack', () => {
+   beforeEach(() => {
+     jest.useRealTimers();
+     jest.clearAllMocks();
++    (emitFunnelTelemetry as jest.Mock).mockClear();
++    (emitCreateJobDraftTelemetry as jest.Mock).mockClear();
+   });
+ 
+   it('submitting triggers POST and renders accepted acknowledgment', async () => {
+@@ -67,11 +86,15 @@ describe('CreateJobScreen submit + ack', () => {
+     (global as any).fetch = fetchMock;
+ 
+     render(<CreateJobScreen colorScheme="light" />);
++    expect(screen.getByTestId('create-job.credits.badge')).toBeTruthy();
++    expect(String(screen.getByText('Generate (6,000 credits)').props.children)).toContain(
++      'Generate',
++    );
+ 
+     fireEvent.press(screen.getByTestId('create-job.submit.button'));
+ 
+     await waitFor(() => {
+-      expect(screen.getByTestId('create-job.submit.ack.accepted')).toBeTruthy();
++      expect(screen.getByTestId('job-status.timeline.root')).toBeTruthy();
+     }, waitForOptions);
+ 
+     expect(fetchMock).toHaveBeenCalledTimes(1);
+@@ -81,8 +104,16 @@ describe('CreateJobScreen submit + ack', () => {
+     expect(headers.get('Authorization')).toBe(`Bearer ${BANYONE_TEST_FIREBASE_ID_TOKEN}`);
+ 
+     const payload = JSON.parse((options as RequestInit).body as string);
++    expect(payload.qualityTier).toBe(1);
+     expect(payload.video.durationSec).toBe(60);
+     expect(payload.image.widthPx).toBe(3000);
++    expect(emitFunnelTelemetry).toHaveBeenCalledWith(
++      expect.objectContaining({
++        funnelStage: 'submit_result',
++        submissionOutcomeClass: 'accepted',
++        terminalJobStatusClass: 'queued',
++      }),
++    );
+   });
+ 
+   it('renders rejected acknowledgment on validation error with deterministic reason testIDs', async () => {
+@@ -160,6 +191,105 @@ describe('CreateJobScreen submit + ack', () => {
+     ).toContain('60');
+   });
+ 
++  it('renders policy-blocked state with stable testIDs when server returns POLICY_VIOLATION', async () => {
++    const fetchMock = jest.fn().mockResolvedValue(
++      jsonFetchResponse({
++        data: null,
++        error: {
++          code: 'POLICY_VIOLATION',
++          message: 'This submission uses a storage location that is not allowed.',
++          retryable: false,
++          traceId: 'trace-policy',
++          details: { policyCode: 'STORAGE_URI_BLOCKED' },
++        },
++      }, 201),
++    );
++    (global as any).fetch = fetchMock;
++
++    render(<CreateJobScreen colorScheme="light" />);
++    fireEvent.press(screen.getByTestId('create-job.submit.button'));
++
++    await waitFor(() => {
++      expect(screen.getByTestId('create-job.policy-blocked.container')).toBeTruthy();
++    }, waitForOptions);
++
++    expect(String(screen.getByTestId('create-job.policy-blocked.message').props.children)).toContain(
++      'not allowed',
++    );
++    expect(String(screen.getByTestId('create-job.policy-blocked.trace').props.children)).toContain(
++      'trace-policy',
++    );
++    expect(String(screen.getByTestId('create-job.policy-blocked.code').props.children)).toContain(
++      'STORAGE_URI_BLOCKED',
++    );
++    expect(screen.queryByTestId('create-job.submit.ack.rejected')).toBeNull();
++  });
++
++  it('renders abuse-restricted state with dedicated copy (not rate-limit countdown)', async () => {
++    const fetchMock = jest.fn().mockResolvedValue(
++      jsonFetchResponse({
++        data: null,
++        error: {
++          code: 'ABUSE_RESTRICTION_ACTIVE',
++          message: 'This account is currently restricted from this action.',
++          retryable: false,
++          traceId: 'trace-abuse',
++        },
++      }, 201),
++    );
++    (global as any).fetch = fetchMock;
++
++    render(<CreateJobScreen colorScheme="light" />);
++    fireEvent.press(screen.getByTestId('create-job.submit.button'));
++
++    await waitFor(() => {
++      expect(screen.getByTestId('create-job.abuse-restricted.container')).toBeTruthy();
++    }, waitForOptions);
++
++    expect(String(screen.getByTestId('create-job.abuse-restricted.message').props.children)).toContain(
++      'restricted',
++    );
++    expect(String(screen.getByTestId('create-job.abuse-restricted.trace').props.children)).toContain(
++      'trace-abuse',
++    );
++    expect(screen.queryByTestId('create-job.submit.ack.rate-limited')).toBeNull();
++  });
++
++  it('renders deterministic insufficient-credit details and rate context', async () => {
++    const fetchMock = jest.fn().mockResolvedValue(
++      jsonFetchResponse({
++        data: null,
++        error: {
++          code: 'INSUFFICIENT_CREDIT',
++          message: 'Not enough credits to generate this video.',
++          retryable: false,
++          traceId: 'trace-credit',
++          details: {
++            balance: 100,
++            required: 241,
++            shortfall: 141,
++            videoCreditPerSecond: 100,
++          },
++        },
++      }, 201),
++    );
++    (global as any).fetch = fetchMock;
++
++    render(<CreateJobScreen colorScheme="light" />);
++    fireEvent.press(screen.getByTestId('create-job.submit.button'));
++
++    await waitFor(() => {
++      expect(screen.getByTestId('create-job.insufficient-credit.container')).toBeTruthy();
++    }, waitForOptions);
++    expect(screen.queryByTestId('create-job.submit.ack.rejected')).toBeNull();
++    expect(String(screen.getByTestId('create-job.insufficient-credit.details').props.children)).toContain(
++      'Current:',
++    );
++    expect(String(screen.getByTestId('create-job.insufficient-credit.rate').props.children)).toContain(
++      'Cost rate:',
++    );
++  });
++
+   it('prevents rapid double taps from triggering multiple requests (in-flight locking)', async () => {
+     let resolveFetch: (value: any) => void;
+     const fetchPromise = new Promise((resolve) => {
+@@ -183,7 +313,7 @@ describe('CreateJobScreen submit + ack', () => {
+     );
+ 
+     await waitFor(() => {
+-      expect(screen.getByTestId('create-job.submit.ack.accepted')).toBeTruthy();
++      expect(screen.getByTestId('job-status.timeline.root')).toBeTruthy();
+     }, waitForOptions);
+   });
+ 
+@@ -208,7 +338,7 @@ describe('CreateJobScreen submit + ack', () => {
+     fireEvent.press(screen.getByTestId('create-job.submit.button'));
+ 
+     await waitFor(() => {
+-      expect(screen.getByTestId('create-job.submit.ack.accepted')).toBeTruthy();
++      expect(screen.getByTestId('job-status.timeline.root')).toBeTruthy();
+     }, waitForOptions);
+ 
+     expect(fetchMock).toHaveBeenCalledTimes(2);
+@@ -218,7 +348,7 @@ describe('CreateJobScreen submit + ack', () => {
+     expect(body0).toEqual(body1);
+   });
+ 
+-  it('shows disclosure gate, acknowledges, then proceeds with submit flow', async () => {
++  it('auto-acknowledges disclosure and proceeds with submit flow after Generate tap', async () => {
+     const fetchMock = jest
+       .fn()
+       .mockResolvedValueOnce(
+@@ -262,18 +392,29 @@ describe('CreateJobScreen submit + ack', () => {
+     fireEvent.press(screen.getByTestId('create-job.submit.button'));
+ 
+     await waitFor(() => {
+-      expect(screen.getByTestId('create-job.disclosure-gate.container')).toBeTruthy();
++      expect(fetchMock).toHaveBeenCalledTimes(3);
+     }, waitForOptions);
+ 
+-    fireEvent.press(screen.getByTestId('create-job.disclosure-gate.acknowledge.button'));
+-
+     await waitFor(() => {
+-      expect(screen.getByTestId('create-job.submit.ack.accepted')).toBeTruthy();
++      expect(screen.getByTestId('job-status.timeline.root')).toBeTruthy();
+     }, waitForOptions);
+ 
+     expect(fetchMock).toHaveBeenCalledTimes(3);
++    expect(screen.queryByTestId('create-job.disclosure-gate.container')).toBeNull();
+     expect(String(fetchMock.mock.calls[1][0])).toContain('/v1/synthetic-media-disclosure/acknowledge');
+     expect(String(fetchMock.mock.calls[2][0])).toContain('/v1/generation-jobs');
++    expect(emitFunnelTelemetry).toHaveBeenCalledWith(
++      expect.objectContaining({
++        funnelStage: 'disclosure_presented',
++        submissionOutcomeClass: 'disclosure_required',
++      }),
++    );
++    expect(emitFunnelTelemetry).toHaveBeenCalledWith(
++      expect.objectContaining({
++        funnelStage: 'disclosure_acknowledged',
++        eventName: 'disclosure_acknowledged',
++      }),
++    );
+   });
+ });
+ 
+diff --git a/apps/mobile/src/features/create-job/screens/create-job-credits-add-button.test.tsx b/apps/mobile/src/features/create-job/screens/create-job-credits-add-button.test.tsx
+new file mode 100644
+index 0000000..4bfa277
+--- /dev/null
++++ b/apps/mobile/src/features/create-job/screens/create-job-credits-add-button.test.tsx
+@@ -0,0 +1,91 @@
++import { fireEvent, render, screen } from '@testing-library/react-native';
++import React from 'react';
++
++import { CreateJobScreen } from '@/features/create-job/screens/create-job-screen';
++
++const mockPush = jest.fn();
++
++jest.mock('expo-router', () => ({
++  useRouter: () => ({ push: mockPush, back: jest.fn(), replace: jest.fn(), canGoBack: () => true }),
++}));
++
++jest.mock('@/infra/telemetry', () => ({
++  emitFunnelTelemetry: jest.fn(),
++  emitCreateJobDraftTelemetry: jest.fn(),
++  emitPreviewExportTelemetry: jest.fn(),
++  getTelemetrySessionId: jest.fn(() => 'test-session-id'),
++}));
++
++jest.mock('@/features/create-job/hooks/use-job-input-selection', () => ({
++  useJobInputSelection: () => ({
++    state: {
++      videoUri: null,
++      videoLabel: null,
++      videoDurationSec: null,
++      videoWidthPx: null,
++      videoHeightPx: null,
++      videoMimeType: null,
++      imageUri: null,
++      imageLabel: null,
++      imageWidthPx: null,
++      imageHeightPx: null,
++      imageMimeType: null,
++    },
++    pickVideo: jest.fn(),
++    pickImage: jest.fn(),
++    clearVideo: jest.fn(),
++    clearImage: jest.fn(),
++    isRestoringDraft: false,
++    draftRestoreNotice: null,
++    dismissDraftNotice: jest.fn(),
++    pendingIdempotencyKey: null,
++    setPendingIdempotencyKey: jest.fn(),
++    clearPersistedDraftAfterAcceptedJob: jest.fn(),
++  }),
++}));
++
++jest.mock('@/features/create-job/hooks/use-job-submission', () => ({
++  useJobSubmission: () => ({
++    isSubmittingJob: false,
++    ack: null,
++    submit: jest.fn(),
++    acknowledgeDisclosure: jest.fn(),
++  }),
++}));
++
++jest.mock('@/features/job-status/hooks/use-job-status-polling', () => ({
++  useJobStatusPolling: () => ({
++    status: null,
++    isRefreshingStatus: false,
++    freshnessSamplesMs: [],
++  }),
++}));
++
++jest.mock('@/features/create-job/hooks/use-generation-credits', () => ({
++  useGenerationCredits: () => ({
++    credits: { balance: 1234, videoCreditPerSecond: 100 },
++    isLoadingCredits: false,
++    creditsError: null,
++    refreshCredits: jest.fn(),
++  }),
++}));
++
++describe('CreateJobScreen credits add-button', () => {
++  beforeEach(() => {
++    mockPush.mockReset();
++  });
++
++  it('renders the plus button beside the credits badge', () => {
++    render(<CreateJobScreen colorScheme="light" />);
++    expect(screen.getByTestId('create-job.credits.badge')).toBeTruthy();
++    expect(screen.getByTestId('create-job.credits.rate')).toBeTruthy();
++    expect(screen.getByText('Rate: 100 credits/sec')).toBeTruthy();
++    expect(screen.getByTestId('create-job.credits.add-button')).toBeTruthy();
++  });
++
++  it('navigates to /paywall when the plus button is pressed', () => {
++    render(<CreateJobScreen colorScheme="light" />);
++    fireEvent.press(screen.getByTestId('create-job.credits.add-button'));
++    expect(mockPush).toHaveBeenCalledWith('/paywall');
++  });
++});

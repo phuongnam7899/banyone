@@ -1,0 +1,2107 @@
+diff --git a/apps/backend/src/modules/jobs/jobs.controller.spec.ts b/apps/backend/src/modules/jobs/jobs.controller.spec.ts
+index 07d3921..dfeb074 100644
+--- a/apps/backend/src/modules/jobs/jobs.controller.spec.ts
++++ b/apps/backend/src/modules/jobs/jobs.controller.spec.ts
+@@ -1,6 +1,7 @@
+ /* eslint-disable @typescript-eslint/no-unsafe-argument -- supertest with Nest INestApplication#getHttpServer() */
+ import { Test } from '@nestjs/testing';
+ import type { INestApplication } from '@nestjs/common';
++import type { Firestore } from 'firebase-admin/firestore';
+ import request from 'supertest';
+ import * as path from 'path';
+ import * as os from 'os';
+@@ -12,6 +13,7 @@ import {
+ } from '@banyone/contracts';
+ 
+ import { ThrottlerEnvelopeExceptionFilter } from '../auth/throttler-envelope.filter';
++import { FIRESTORE } from '../../infra/firestore.module';
+ import { JobsModule } from './jobs.module';
+ import { JobsService } from './jobs.service';
+ import type {
+@@ -85,6 +87,7 @@ describe('JobsController', () => {
+         jobId: string;
+         status: 'queued' | 'processing' | 'ready' | 'failed';
+         updatedAt: string;
++        sourceImageUrl?: string;
+       }>;
+     };
+     error: null;
+@@ -94,12 +97,15 @@ describe('JobsController', () => {
+   beforeEach(async () => {
+     dataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-jobs-'));
+     notifDataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-notif-jobs-'));
+-    disclosureDataDir = mkdtempSync(path.join(os.tmpdir(), 'banyone-disclosure-jobs-'));
++    disclosureDataDir = mkdtempSync(
++      path.join(os.tmpdir(), 'banyone-disclosure-jobs-'),
++    );
+     process.env.BANYONE_JOBS_DATA_DIR = dataDir;
+     process.env.BANYONE_NOTIFICATIONS_DATA_DIR = notifDataDir;
+     process.env.BANYONE_DISCLOSURE_DATA_DIR = disclosureDataDir;
+     process.env.BANYONE_AUTH_VERIFIER = 'test';
+     process.env.BANYONE_AUTH_TEST_UID = 'test-user-uid';
++    process.env.BANYONE_DEFAULT_USER_CREDITS = '100000';
+ 
+     const moduleRef = await Test.createTestingModule({
+       imports: [JobsModule],
+@@ -140,6 +146,12 @@ describe('JobsController', () => {
+     }
+     delete process.env.BANYONE_AUTH_VERIFIER;
+     delete process.env.BANYONE_AUTH_TEST_UID;
++    delete process.env.BANYONE_POLICY_BLOCKED_URI_SUBSTRINGS;
++    delete process.env.BANYONE_DEFAULT_USER_CREDITS;
++    delete process.env.BANYONE_VIDEO_CREDIT_PER_SECOND;
++    delete process.env.BANYONE_IS_TESTING_ENV;
++    delete process.env.REPLICATE_API_TOKEN;
++    delete process.env.REPLICATE_MODEL;
+   });
+ 
+   const validBody = {
+@@ -227,6 +239,124 @@ describe('JobsController', () => {
+     expect(body.data.status).toBe('queued');
+   });
+ 
++  it('GET /v1/generation-jobs/credits returns current balance and per-second rate', async () => {
++    const firestore = app.get<Firestore>(FIRESTORE);
++    await firestore.collection('user_credits').doc('test-user-uid').set({
++      balance: 3210,
++      updatedAtMs: Date.now(),
++    });
++
++    const res = await request(app.getHttpServer())
++      .get('/v1/generation-jobs/credits')
++      .set(authHeader)
++      .expect(200);
++
++    const body = res.body as {
++      data: { balance: number; videoCreditPerSecond: number };
++      error: null;
++    };
++    expect(body.error).toBeNull();
++    expect(body.data.balance).toBe(3210);
++    expect(body.data.videoCreditPerSecond).toBe(100);
++  });
++
++  it('GET /v1/generation-jobs/credits returns 401 when Authorization is missing', async () => {
++    const res = await request(app.getHttpServer())
++      .get('/v1/generation-jobs/credits')
++      .expect(401);
++
++    const authBody = res.body as Http401AuthBody;
++    expect(authBody.data).toBeNull();
++    expect(authBody.error.code).toBe('UNAUTHENTICATED');
++    expect(authBody.error.retryable).toBe(false);
++    expect(authBody.error.traceId).toEqual(expect.any(String));
++  });
++
++  it('POST /v1/generation-jobs returns INSUFFICIENT_CREDIT when balance is too low', async () => {
++    const firestore = app.get<Firestore>(FIRESTORE);
++    await firestore.collection('user_credits').doc('test-user-uid').set({
++      balance: 50,
++      updatedAtMs: Date.now(),
++    });
++
++    const res = await request(app.getHttpServer())
++      .post('/v1/generation-jobs')
++      .set(authHeader)
++      .set('x-banyone-idempotency-key', 'idem-key-insufficient-credit')
++      .send(validBody)
++      .expect(201);
++
++    const body = res.body as ErrorEnvelope;
++    expect(body.data).toBeNull();
++    expect(body.error.code).toBe('INSUFFICIENT_CREDIT');
++    expect(body.error.retryable).toBe(false);
++    expect(body.error.details).toEqual(
++      expect.objectContaining({
++        balance: 50,
++        required: 6000,
++        shortfall: 5950,
++        videoCreditPerSecond: 100,
++      }),
++    );
++  });
++
++  it('POST /v1/generation-jobs/assets uploads media and returns asset URL envelope', async () => {
++    const res = await request(app.getHttpServer())
++      .post('/v1/generation-jobs/assets')
++      .set(authHeader)
++      .field('slot', 'image')
++      .attach('file', Buffer.from('fake-image-content'), {
++        filename: 'face.jpg',
++        contentType: 'image/jpeg',
++      })
++      .expect(201);
++
++    const body = res.body as {
++      data: {
++        slot: 'image';
++        assetUrl: string;
++        mimeType: string | null;
++        sizeBytes: number;
++      };
++      error: null;
++    };
++    expect(body.error).toBeNull();
++    expect(body.data.slot).toBe('image');
++    expect(body.data.assetUrl).toContain('/v1/media/');
++    expect(body.data.mimeType).toBe('image/jpeg');
++    expect(body.data.sizeBytes).toBeGreaterThan(0);
++  });
++
++  it('POST /v1/generation-jobs persists qualityTier and GET /v1/generation-jobs/:id returns it', async () => {
++    await request(app.getHttpServer())
++      .post('/v1/synthetic-media-disclosure/acknowledge')
++      .set(authHeader)
++      .send({ version: 'v1' })
++      .expect(200);
++
++    const createRes = await request(app.getHttpServer())
++      .post('/v1/generation-jobs')
++      .set(authHeader)
++      .set('x-banyone-idempotency-key', 'idem-key-quality-tier')
++      .send({ ...validBody, qualityTier: 2 })
++      .expect(201);
++
++    const jobId = (createRes.body as SuccessEnvelope).data.jobId;
++
++    const statusRes = await request(app.getHttpServer())
++      .get(`/v1/generation-jobs/${jobId}`)
++      .set(authHeader)
++      .expect(200);
++
++    type StatusOk = {
++      data: { qualityTier?: number; status: string };
++      error: null;
++    };
++    const statusBody = statusRes.body as StatusOk;
++    expect(statusBody.error).toBeNull();
++    expect(statusBody.data.qualityTier).toBe(2);
++  });
++
+   it('POST /v1/generation-jobs returns DISCLOSURE_REQUIRED before first acknowledgment', async () => {
+     const res = await request(app.getHttpServer())
+       .post('/v1/generation-jobs')
+@@ -245,6 +375,54 @@ describe('JobsController', () => {
+     });
+   });
+ 
++  it('POST /v1/generation-jobs returns PROVIDER_NOT_CONFIGURED in strict runtime mode', async () => {
++    const originalNodeEnv = process.env.NODE_ENV;
++    const originalApiToken = process.env.REPLICATE_API_TOKEN;
++    const originalModel = process.env.REPLICATE_MODEL;
++    process.env.NODE_ENV = 'development';
++    delete process.env.REPLICATE_API_TOKEN;
++    delete process.env.REPLICATE_MODEL;
++
++    try {
++      const res = await request(app.getHttpServer())
++        .post('/v1/generation-jobs')
++        .set(authHeader)
++        .set('x-banyone-idempotency-key', 'idem-key-provider-missing')
++        .send(validBody)
++        .expect(201);
++
++      const body = res.body as ErrorEnvelope;
++      expect(body.data).toBeNull();
++      expect(body.error.code).toBe('PROVIDER_NOT_CONFIGURED');
++      expect(body.error.retryable).toBe(false);
++    } finally {
++      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
++      else process.env.NODE_ENV = originalNodeEnv;
++      if (originalApiToken === undefined) delete process.env.REPLICATE_API_TOKEN;
++      else process.env.REPLICATE_API_TOKEN = originalApiToken;
++      if (originalModel === undefined) delete process.env.REPLICATE_MODEL;
++      else process.env.REPLICATE_MODEL = originalModel;
++    }
++  });
++
++  it('POST /v1/generation-jobs bypasses Replicate when BANYONE_IS_TESTING_ENV=true', async () => {
++    process.env.BANYONE_IS_TESTING_ENV = 'true';
++    process.env.REPLICATE_API_TOKEN = 'fake-token';
++    process.env.REPLICATE_MODEL = 'wan-video/wan-2.2-animate-replace';
++
++    const res = await request(app.getHttpServer())
++      .post('/v1/generation-jobs')
++      .set(authHeader)
++      .set('x-banyone-idempotency-key', 'idem-key-testing-env-mock')
++      .send(validBody)
++      .expect(201);
++
++    const body = res.body as SuccessEnvelope;
++    expect(body.error).toBeNull();
++    expect(body.data.jobId).toEqual(expect.any(String));
++    expect(body.data.status).toBe('queued');
++  });
++
+   it('POST /v1/synthetic-media-disclosure/acknowledge records acceptance for authenticated user', async () => {
+     const res = await request(app.getHttpServer())
+       .post('/v1/synthetic-media-disclosure/acknowledge')
+@@ -252,13 +430,21 @@ describe('JobsController', () => {
+       .send({ version: 'v1' })
+       .expect(200);
+ 
+-    expect(res.body.error).toBeNull();
+-    expect(res.body.data).toMatchObject({
++    const ackBody = res.body as {
++      error: null;
++      data: {
++        accepted: boolean;
++        currentVersion: string;
++        acceptance: { version: string; acceptedAt: string };
++      };
++    };
++    expect(ackBody.error).toBeNull();
++    expect(ackBody.data).toMatchObject({
+       accepted: true,
+       currentVersion: 'v1',
+       acceptance: { version: 'v1' },
+     });
+-    expect(res.body.data.acceptance.acceptedAt).toEqual(expect.any(String));
++    expect(ackBody.data.acceptance.acceptedAt).toEqual(expect.any(String));
+   });
+ 
+   it('POST /v1/generation-jobs returns INPUT_INVALID error envelope with contract-aligned details', async () => {
+@@ -308,6 +494,33 @@ describe('JobsController', () => {
+     expect(details.violations).toEqual(expectedViolations);
+   });
+ 
++  it('POST /v1/generation-jobs returns POLICY_VIOLATION when storage uri matches configured blocklist', async () => {
++    process.env.BANYONE_POLICY_BLOCKED_URI_SUBSTRINGS = '__blocked_uri__';
++    const blockedBody = {
++      ...validBody,
++      video: {
++        ...validBody.video,
++        uri: 'file:///tmp/__blocked_uri__/clip.mp4',
++      },
++    };
++
++    const res = await request(app.getHttpServer())
++      .post('/v1/generation-jobs')
++      .set(authHeader)
++      .set('x-banyone-idempotency-key', 'idem-policy-blocked')
++      .send(blockedBody)
++      .expect(201);
++
++    const body = res.body as ErrorEnvelope;
++    expect(body.data).toBeNull();
++    expect(body.error.code).toBe('POLICY_VIOLATION');
++    expect(body.error.retryable).toBe(false);
++    expect(body.error.details).toEqual({
++      policyCode: 'STORAGE_URI_BLOCKED',
++    });
++    expect(body.error.traceId).toEqual(expect.any(String));
++  });
++
+   it('is idempotent per x-banyone-idempotency-key (same jobId returned)', async () => {
+     const key = 'idem-key-same';
+ 
+@@ -471,6 +684,7 @@ describe('JobsController', () => {
+       status: 'ready',
+       readyAtMs: nowMs,
+       updatedAtMs: nowMs,
++      sourceImageUrl: 'http://localhost:3000/assets/image-ready.jpg',
+     });
+     jobsService.__testSeedJob({
+       jobId: 'history-other-user',
+@@ -504,6 +718,7 @@ describe('JobsController', () => {
+     const first = body.data.items[0];
+     expect(first.status).toBe('ready');
+     expect(first.updatedAt).toEqual(expect.any(String));
++    expect(first.sourceImageUrl).toBe('http://localhost:3000/assets/image-ready.jpg');
+   });
+ 
+   it('GET /v1/generation-jobs/:id returns JOB_NOT_FOUND for non-owned jobs', async () => {
+diff --git a/apps/backend/src/modules/jobs/jobs.controller.ts b/apps/backend/src/modules/jobs/jobs.controller.ts
+index 119c8d8..3d9e04d 100644
+--- a/apps/backend/src/modules/jobs/jobs.controller.ts
++++ b/apps/backend/src/modules/jobs/jobs.controller.ts
+@@ -1,13 +1,18 @@
+ import {
++  BadRequestException,
+   Body,
+   Controller,
+   Get,
+   Headers,
+   Param,
+   Post,
++  UploadedFile,
+   UseGuards,
++  UseInterceptors,
+ } from '@nestjs/common';
++import { FileInterceptor } from '@nestjs/platform-express';
+ import { SkipThrottle } from '@nestjs/throttler';
++import { memoryStorage } from 'multer';
+ import type { CreateGenerationJobRequestBody } from './dto/create-generation-job.request';
+ import { CurrentUser } from '../auth/current-user.decorator';
+ import { BanyoneUserThrottlerGuard } from '../auth/banyone-user-throttler.guard';
+@@ -17,16 +22,27 @@ import type {
+   GenerationJobHistoryListEnvelope,
+   GenerationJobEnvelope,
+   GenerationJobExportEnvelope,
++  GenerationJobCreditsEnvelope,
+   GenerationJobPreviewEnvelope,
+   GenerationJobStatusEnvelope,
+ } from './jobs.types';
+ import { JobsService } from './jobs.service';
++import { JobMediaAssetsService } from './job-media-assets.service';
++
++type UploadedBinaryFile = {
++  buffer: Buffer;
++  originalname?: string;
++  mimetype?: string;
++};
+ 
+ @UseGuards(FirebaseAuthGuard, BanyoneUserThrottlerGuard)
+ @SkipThrottle({ default: true })
+ @Controller('v1')
+ export class JobsController {
+-  constructor(private readonly jobsService: JobsService) {}
++  constructor(
++    private readonly jobsService: JobsService,
++    private readonly jobMediaAssets: JobMediaAssetsService,
++  ) {}
+ 
+   /**
+    * OpenAPI (inline minimal docs):
+@@ -35,6 +51,8 @@ export class JobsController {
+    * - Body: { video: {...}, image: {...} }
+    * - 200: { data: { jobId: string, status: 'queued' }, error: null }
+    * - 4xx: { data: null, error: { code, message, retryable, details?, traceId } }
++   *   - Policy block after validation: code `POLICY_VIOLATION`, retryable false,
++   *     details `{ policyCode: 'STORAGE_URI_BLOCKED' }` (see @banyone/contracts).
+    */
+   @Post('generation-jobs')
+   @SkipThrottle({ default: false })
+@@ -50,6 +68,73 @@ export class JobsController {
+     });
+   }
+ 
++  @Get('generation-jobs/credits')
++  getGenerationCredits(
++    @CurrentUser() user: BanyoneAuthUser,
++  ): Promise<GenerationJobCreditsEnvelope> {
++    return this.jobsService.getGenerationCredits({ userId: user.uid });
++  }
++
++  @Post('generation-jobs/assets')
++  @SkipThrottle({ default: false })
++  @UseInterceptors(
++    FileInterceptor('file', {
++      storage: memoryStorage(),
++    }),
++  )
++  uploadGenerationJobAsset(
++    @CurrentUser() user: BanyoneAuthUser,
++    @Body('slot') slot: 'video' | 'image',
++    @UploadedFile() fileRaw?: unknown,
++  ): {
++    data: {
++      slot: 'video' | 'image';
++      assetUrl: string;
++      mimeType: string | null;
++      sizeBytes: number;
++    };
++    error: null;
++  } {
++    if (slot !== 'video' && slot !== 'image') {
++      throw new BadRequestException('slot must be video or image');
++    }
++    const file = (fileRaw ?? null) as UploadedBinaryFile | null;
++    if (!file || !Buffer.isBuffer(file.buffer) || file.buffer.byteLength === 0) {
++      throw new BadRequestException('file is required');
++    }
++    if (
++      file.buffer.byteLength > this.jobMediaAssets.getMaxUploadSizeBytes()
++    ) {
++      throw new BadRequestException('file too large');
++    }
++    const mimeType =
++      typeof file.mimetype === 'string'
++        ? file.mimetype
++        : 'application/octet-stream';
++    if (slot === 'video' && !mimeType.startsWith('video/')) {
++      throw new BadRequestException('video slot requires a video file');
++    }
++    if (slot === 'image' && !mimeType.startsWith('image/')) {
++      throw new BadRequestException('image slot requires an image file');
++    }
++    const stored = this.jobMediaAssets.persistUpload({
++      userId: user.uid,
++      slot,
++      originalName: file.originalname,
++      buffer: file.buffer,
++      mimeType,
++    });
++    return {
++      data: {
++        slot,
++        assetUrl: stored.assetUrl,
++        mimeType: stored.mimeType,
++        sizeBytes: stored.sizeBytes,
++      },
++      error: null,
++    };
++  }
++
+   /**
+    * Returns canonical job lifecycle payload for the status timeline.
+    *
+@@ -61,7 +146,7 @@ export class JobsController {
+   @Get('generation-jobs')
+   listGenerationJobs(
+     @CurrentUser() user: BanyoneAuthUser,
+-  ): GenerationJobHistoryListEnvelope {
++  ): Promise<GenerationJobHistoryListEnvelope> {
+     return this.jobsService.listGenerationJobs({ userId: user.uid });
+   }
+ 
+@@ -69,7 +154,7 @@ export class JobsController {
+   getGenerationJobStatus(
+     @CurrentUser() user: BanyoneAuthUser,
+     @Param('id') id: string,
+-  ): GenerationJobStatusEnvelope {
++  ): Promise<GenerationJobStatusEnvelope> | GenerationJobStatusEnvelope {
+     return this.jobsService.getGenerationJobStatus({
+       userId: user.uid,
+       jobId: id,
+@@ -80,7 +165,7 @@ export class JobsController {
+   getGenerationJobPreview(
+     @CurrentUser() user: BanyoneAuthUser,
+     @Param('id') id: string,
+-  ): GenerationJobPreviewEnvelope {
++  ): Promise<GenerationJobPreviewEnvelope> {
+     return this.jobsService.getGenerationJobPreview({
+       userId: user.uid,
+       jobId: id,
+@@ -92,7 +177,7 @@ export class JobsController {
+   createGenerationJobExport(
+     @CurrentUser() user: BanyoneAuthUser,
+     @Param('id') id: string,
+-  ): GenerationJobExportEnvelope {
++  ): Promise<GenerationJobExportEnvelope> {
+     return this.jobsService.createGenerationJobExport({
+       userId: user.uid,
+       jobId: id,
+diff --git a/apps/backend/src/modules/jobs/jobs.service.ts b/apps/backend/src/modules/jobs/jobs.service.ts
+index d2fa650..a8d7925 100644
+--- a/apps/backend/src/modules/jobs/jobs.service.ts
++++ b/apps/backend/src/modules/jobs/jobs.service.ts
+@@ -1,16 +1,38 @@
+ import { Injectable } from '@nestjs/common';
++import { Inject } from '@nestjs/common';
+ import { randomUUID } from 'crypto';
+-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+-import * as path from 'path';
+-import { validateJobInputCompliance } from '@banyone/contracts';
+-
++import type { Firestore } from 'firebase-admin/firestore';
++import {
++  ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
++  INSUFFICIENT_CREDIT_ERROR_CODE,
++  type JobCostSignalPayloadV1,
++  POLICY_VIOLATION_ERROR_CODE,
++  computeTimeToPreviewMs,
++  DEFAULT_QUALITY_TIER,
++  JOB_LIFECYCLE_METRICS_SCHEMA_VERSION,
++  isJobPolicyViolationDetails,
++  validateJobInputCompliance,
++} from '@banyone/contracts';
++
++import { emitJobLifecycleMetricsV1Log } from '../../telemetry/job-lifecycle-metrics';
++import { FIRESTORE } from '../../infra/firestore.module';
++import {
++  computeJobCostSignalV1,
++  emitJobCostSignalV1Log,
++} from '../../telemetry/job-cost-signal';
++import { AbuseService } from '../abuse/abuse.service';
+ import { SyntheticMediaDisclosureStore } from '../disclosure/synthetic-media-disclosure.store';
++import { JobPolicyScreeningService } from '../job-policy/job-policy-screening.service';
+ import { JobLifecyclePushService } from '../notifications/job-lifecycle-push.service';
++import { JobMediaAssetsService } from './job-media-assets.service';
+ import { assertAllowedLifecycleTransition } from './jobs.lifecycle';
++import { ReplicateGenerationProvider } from './replicate-generation.provider';
+ import type { CreateGenerationJobRequestBody } from './dto/create-generation-job.request';
++import { UserCreditsStore } from './user-credits.store';
+ import type {
+   GenerationJobEnvelope,
+   GenerationJobExportEnvelope,
++  GenerationJobCreditsEnvelope,
+   GenerationJobHistoryDetailEnvelope,
+   GenerationJobHistoryListEnvelope,
+   GenerationJobInputViolationDetail,
+@@ -35,10 +57,13 @@ type PersistedJobsStore = {
+   jobs: Record<string, PersistedJobRecord>;
+ };
+ 
+-type PersistedJobRecord = {
++export type PersistedJobRecord = {
+   jobId: string;
+   userId: string;
+   status: GenerationJobStatus;
++  traceId?: string;
++  /** Metrics segmentation; defaults to {@link DEFAULT_QUALITY_TIER} when missing (legacy rows). */
++  qualityTier?: number;
+ 
+   // Internal timestamps stored as unix epoch milliseconds.
+   updatedAtMs: number;
+@@ -52,18 +77,52 @@ type PersistedJobRecord = {
+     reasonCode: string;
+     nextAction: string;
+     message: string;
++    traceId?: string;
+   };
++  /**
++   * Story 5.3 server-owned internal economics signal (not exposed on user mobile payloads).
++   * Present only after first terminalization (`ready` | `failed`).
++   */
++  jobCostSignalV1?: JobCostSignalPayloadV1;
++  providerKey?: 'replicate';
++  providerPredictionId?: string;
++  providerStatus?: string;
++  sourceVideoUrl?: string;
++  sourceImageUrl?: string;
++  outputUrl?: string;
++  creditsRequired?: number;
++  creditsChargedAtMs?: number;
+ };
+ 
+ function scopedIdempotencyKey(userId: string, clientKey: string): string {
+   return `${userId}${IDEMPOTENCY_SCOPING_SEP}${clientKey}`;
+ }
+ 
++function normalizeQualityTierInput(input: unknown): number {
++  if (typeof input !== 'number' || !Number.isFinite(input)) {
++    return DEFAULT_QUALITY_TIER;
++  }
++  const n = Math.floor(input);
++  if (n < 1) return 1;
++  if (n > 99) return 99;
++  return n;
++}
++
++function computeRequiredCredits(params: {
++  videoDurationSec: number | null;
++  videoCreditPerSecond: number;
++}): number {
++  const duration = params.videoDurationSec;
++  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) {
++    return 0;
++  }
++  return Math.ceil(duration * params.videoCreditPerSecond);
++}
++
+ @Injectable()
+ export class JobsService {
+-  private readonly storeDir: string;
+-  private readonly storeFilePath: string;
+   private store: PersistedJobsStore;
++  private storeLoadPromise: Promise<void> | null = null;
+   private readonly inFlight = new Map<string, Promise<GenerationJobEnvelope>>();
+ 
+   // MVP lifecycle progression model:
+@@ -79,29 +138,44 @@ export class JobsService {
+   private illegalTransitionCount = 0;
+ 
+   constructor(
++    @Inject(FIRESTORE) private readonly firestore: Firestore,
+     private readonly jobLifecyclePush: JobLifecyclePushService,
+     private readonly disclosure: SyntheticMediaDisclosureStore,
++    private readonly abuse: AbuseService,
++    private readonly jobPolicy: JobPolicyScreeningService,
++    private readonly replicateProvider: ReplicateGenerationProvider,
++    private readonly mediaAssets: JobMediaAssetsService,
++    private readonly userCredits: UserCreditsStore,
+   ) {
+-    // Tests can set BANYONE_JOBS_DATA_DIR to isolate persistence.
+-    const configuredDir = process.env.BANYONE_JOBS_DATA_DIR;
+-    this.storeDir =
+-      configuredDir ?? path.join(process.cwd(), '.banyone-jobs-data');
+-    this.storeFilePath = path.join(this.storeDir, 'jobs-store.json');
+-    mkdirSync(this.storeDir, { recursive: true });
+-    this.store = this.loadStore();
++    this.store = { version: 3, idempotency: {}, jobs: {} };
++    this.logProviderConfiguration();
+   }
+ 
+-  private loadStore(): PersistedJobsStore {
+-    if (!existsSync(this.storeFilePath)) {
+-      return { version: 3, idempotency: {}, jobs: {} };
+-    }
+-    try {
+-      const raw = readFileSync(this.storeFilePath, { encoding: 'utf-8' });
+-      const parsedUnknown = JSON.parse(raw) as unknown;
+-      return this.normalizePersistedJobsStore(parsedUnknown);
+-    } catch {
+-      return { version: 3, idempotency: {}, jobs: {} };
+-    }
++  private logProviderConfiguration(): void {
++    console.info('telemetry.jobs.provider.config.v1', {
++      provider: 'replicate',
++      enabled: this.replicateProvider.isEnabled(),
++      model: this.replicateProvider.getConfiguredModel() || null,
++      strictMode: !this.allowMockJobFlow(),
++    });
++  }
++
++  private allowMockJobFlow(): boolean {
++    return (
++      process.env.NODE_ENV === 'test' ||
++      process.env.BANYONE_IS_TESTING_ENV === 'true' ||
++      process.env.BANYONE_ALLOW_STUB_JOBS === 'true'
++    );
++  }
++
++  private async ensureStoreLoaded(): Promise<void> {
++    if (this.storeLoadPromise) return this.storeLoadPromise;
++    this.storeLoadPromise = (async () => {
++      const snapshot = await this.firestore.collection('jobs_store').doc('state').get();
++      if (!snapshot.exists) return;
++      this.store = this.normalizePersistedJobsStore(snapshot.data());
++    })();
++    await this.storeLoadPromise;
+   }
+ 
+   private normalizePersistedJobsStore(
+@@ -159,6 +233,7 @@ export class JobsService {
+           jobId,
+           userId: LEGACY_UNSCOPED_USER_ID,
+           status,
++          qualityTier: DEFAULT_QUALITY_TIER,
+           updatedAtMs: nowMs,
+           queuedAtMs: status === 'queued' ? nowMs : undefined,
+           processingAtMs: status === 'processing' ? nowMs : undefined,
+@@ -210,15 +285,60 @@ export class JobsService {
+           ...(typeof j.failedAtMs === 'number'
+             ? { failedAtMs: j.failedAtMs }
+             : {}),
+-          ...(typeof j.failure === 'object' &&
+-          j.failure !== null &&
+-          'retryable' in j.failure &&
+-          'reasonCode' in j.failure &&
+-          'nextAction' in j.failure &&
+-          'message' in j.failure
+-            ? {
+-                failure: j.failure as PersistedJobRecord['failure'],
+-              }
++          ...(typeof j.failure === 'object' && j.failure !== null
++            ? (() => {
++                const failure = j.failure as Record<string, unknown>;
++                if (
++                  typeof failure.retryable !== 'boolean' ||
++                  typeof failure.reasonCode !== 'string' ||
++                  typeof failure.nextAction !== 'string' ||
++                  typeof failure.message !== 'string'
++                ) {
++                  return {};
++                }
++                return {
++                  failure: {
++                    retryable: failure.retryable,
++                    reasonCode: failure.reasonCode,
++                    nextAction: failure.nextAction,
++                    message: failure.message,
++                    ...(typeof failure.traceId === 'string'
++                      ? { traceId: failure.traceId }
++                      : {}),
++                  },
++                };
++              })()
++            : {}),
++          ...(typeof j.traceId === 'string' ? { traceId: j.traceId } : {}),
++          ...(typeof j.qualityTier === 'number'
++            ? { qualityTier: normalizeQualityTierInput(j.qualityTier) }
++            : {}),
++          ...(isPersistedJobCostSignalV1(j.jobCostSignalV1)
++            ? { jobCostSignalV1: j.jobCostSignalV1 }
++            : {}),
++          ...(j.providerKey === 'replicate' ? { providerKey: 'replicate' } : {}),
++          ...(typeof j.providerPredictionId === 'string'
++            ? { providerPredictionId: j.providerPredictionId }
++            : {}),
++          ...(typeof j.providerStatus === 'string'
++            ? { providerStatus: j.providerStatus }
++            : {}),
++          ...(typeof j.sourceVideoUrl === 'string'
++            ? { sourceVideoUrl: j.sourceVideoUrl }
++            : {}),
++          ...(typeof j.sourceImageUrl === 'string'
++            ? { sourceImageUrl: j.sourceImageUrl }
++            : {}),
++          ...(typeof j.outputUrl === 'string' ? { outputUrl: j.outputUrl } : {}),
++          ...(typeof j.creditsRequired === 'number' &&
++          Number.isFinite(j.creditsRequired) &&
++          j.creditsRequired > 0
++            ? { creditsRequired: Math.ceil(j.creditsRequired) }
++            : {}),
++          ...(typeof j.creditsChargedAtMs === 'number' &&
++          Number.isFinite(j.creditsChargedAtMs) &&
++          j.creditsChargedAtMs > 0
++            ? { creditsChargedAtMs: Math.floor(j.creditsChargedAtMs) }
+             : {}),
+         };
+       }
+@@ -250,10 +370,8 @@ export class JobsService {
+     return { version: 3, idempotency, jobs };
+   }
+ 
+-  private saveStore(): void {
+-    writeFileSync(this.storeFilePath, JSON.stringify(this.store, null, 2), {
+-      encoding: 'utf-8',
+-    });
++  private async saveStore(): Promise<void> {
++    await this.firestore.collection('jobs_store').doc('state').set(this.store);
+   }
+ 
+   private normalizeIdempotencyKey(
+@@ -306,6 +424,7 @@ export class JobsService {
+     body: CreateGenerationJobRequestBody;
+     idempotencyKeyHeader?: string;
+   }): Promise<GenerationJobEnvelope> {
++    await this.ensureStoreLoaded();
+     const startedAt = Date.now();
+     const normalized = this.normalizeIdempotencyKey(
+       params.idempotencyKeyHeader,
+@@ -344,6 +463,22 @@ export class JobsService {
+     return envelope;
+   }
+ 
++  async getGenerationCredits(params: {
++    userId: string;
++  }): Promise<GenerationJobCreditsEnvelope> {
++    const [balance, videoCreditPerSecond] = await Promise.all([
++      this.userCredits.getBalance(params.userId),
++      Promise.resolve(this.userCredits.getVideoCreditPerSecond()),
++    ]);
++    return {
++      data: {
++        balance,
++        videoCreditPerSecond,
++      },
++      error: null,
++    };
++  }
++
+   private recordAckTelemetry(
+     envelope: GenerationJobEnvelope,
+     startedAt: number,
+@@ -358,23 +493,60 @@ export class JobsService {
+       return;
+     }
+ 
+-    const details = envelope.error.details as
++    const detailsUnknown = envelope.error.details;
++    const policyDetails = isJobPolicyViolationDetails(detailsUnknown)
++      ? detailsUnknown
++      : undefined;
++    const validationDetails = envelope.error.details as
+       | GenerationJobValidationErrorDetails
+       | undefined;
+-    const rejectionCodes = details?.violations?.map((v) => v.code) ?? [];
++    const rejectionCodes =
++      policyDetails !== undefined
++        ? [policyDetails.policyCode]
++        : (validationDetails?.violations?.map((v) => v.code) ?? []);
++    const normalizedRejectionCodes =
++      rejectionCodes.length > 0 ? rejectionCodes : [envelope.error.code];
++    const rejectionReason = this.mapRejectedAckReason(
++      envelope.error.code,
++      envelope.error.message,
++    );
+ 
+     console.info('telemetry.jobs.generation.acknowledged.v1', {
+       outcome: 'rejected',
+-      rejectionCodes,
++      errorCode: envelope.error.code,
++      rejectionCodes: normalizedRejectionCodes,
++      reason: rejectionReason,
+       serverAckHandlingMs: Date.now() - startedAt,
+       traceId: envelope.error.traceId,
+     });
+   }
+ 
+-  getGenerationJobStatus(params: {
++  private mapRejectedAckReason(errorCode: string, message: string): string {
++    if (errorCode !== 'INPUT_INVALID') {
++      return errorCode.toLowerCase();
++    }
++
++    if (message.includes('Video must be uploaded first')) {
++      return 'video_asset_not_uploaded';
++    }
++    if (message.includes('Image must be uploaded first')) {
++      return 'image_asset_not_uploaded';
++    }
++    if (message.includes('Uploaded media could not be read')) {
++      return 'uploaded_media_unreadable';
++    }
++    if (message.includes('Input validation failed')) {
++      return 'contract_validation_failed';
++    }
++
++    return 'input_invalid_unspecified';
++  }
++
++  async getGenerationJobStatus(params: {
+     userId: string;
+     jobId: string;
+-  }): GenerationJobStatusEnvelope {
++  }): Promise<GenerationJobStatusEnvelope> {
++    await this.ensureStoreLoaded();
+     const job = this.store.jobs[params.jobId];
+     if (!job || job.userId !== params.userId) {
+       // Keep canonical envelope shape, even for not-found.
+@@ -386,10 +558,14 @@ export class JobsService {
+     }
+ 
+     const nowMs = Date.now();
+-    const transition = this.advanceJobLifecycleIfNeeded({
+-      job,
+-      nowMs,
+-    });
++    if (
++      job.providerKey === 'replicate' &&
++      job.providerPredictionId &&
++      (job.status === 'queued' || job.status === 'processing')
++    ) {
++      return this.getGenerationJobStatusFromReplicate({ job, nowMs });
++    }
++    const transition = this.advanceJobLifecycleIfNeeded({ job, nowMs });
+ 
+     if (transition) {
+       console.info('telemetry.jobs.lifecycle.transition.v1', {
+@@ -400,11 +576,9 @@ export class JobsService {
+       });
+     }
+ 
+-    // Persist any status changes to maintain canonical server truth.
+-    if (transition) this.saveStore();
+-
+     if (transition) {
+       if (transition.to === 'ready') {
++        await this.chargeCreditsOnce(job, nowMs);
+         this.jobLifecyclePush.notifyJobReady(job.userId, job.jobId);
+       }
+       if (transition.to === 'failed' && job.failure) {
+@@ -414,6 +588,33 @@ export class JobsService {
+           job.failure,
+         );
+       }
++
++      if (transition.to === 'ready' || transition.to === 'failed') {
++        const terminalStatus = transition.to;
++        const tier = job.qualityTier ?? DEFAULT_QUALITY_TIER;
++        const costSignal = computeJobCostSignalV1({
++          jobId: job.jobId,
++          qualityTier: tier,
++          terminalStatus,
++        });
++        job.jobCostSignalV1 = costSignal;
++        const timeToPreviewMs = computeTimeToPreviewMs({
++          queuedAtMs: job.queuedAtMs,
++          readyAtMs: job.readyAtMs,
++          terminalStatus,
++        });
++        emitJobLifecycleMetricsV1Log({
++          schemaVersion: JOB_LIFECYCLE_METRICS_SCHEMA_VERSION,
++          jobId: job.jobId,
++          terminalStatus,
++          qualityTier: tier,
++          timeToPreviewMs,
++        });
++        emitJobCostSignalV1Log(costSignal);
++      }
++
++      // Persist any status changes to maintain canonical server truth.
++      await this.saveStore();
+     }
+ 
+     const payload = this.mapJobToStatusPayload({
+@@ -427,9 +628,115 @@ export class JobsService {
+     };
+   }
+ 
+-  listGenerationJobs(params: {
++  private async getGenerationJobStatusFromReplicate(params: {
++    job: PersistedJobRecord;
++    nowMs: number;
++  }): Promise<GenerationJobStatusEnvelope> {
++    const { job, nowMs } = params;
++    const previous = job.status;
++    try {
++      const polled = await this.replicateProvider.getPrediction(
++        job.providerPredictionId as string,
++      );
++      const mapped = this.mapReplicateStatus(polled.status, polled.outputUrl);
++      job.providerStatus = polled.status;
++      if (mapped.outputUrl) job.outputUrl = mapped.outputUrl;
++      if (mapped.status !== previous) {
++        job.status = mapped.status;
++        job.updatedAtMs = nowMs;
++        if (mapped.status === 'processing') {
++          job.processingAtMs = nowMs;
++        }
++        if (mapped.status === 'ready') {
++          job.readyAtMs = nowMs;
++          delete job.failure;
++          await this.chargeCreditsOnce(job, nowMs);
++          this.jobLifecyclePush.notifyJobReady(job.userId, job.jobId);
++        }
++        if (mapped.status === 'failed') {
++          job.failedAtMs = nowMs;
++          job.failure = {
++            ...this.buildFailureMetadata({
++              jobId: job.jobId,
++              traceId: this.readPersistedTraceId(job),
++            }),
++            message:
++              polled.errorMessage?.trim() ||
++              'Processing failed and cannot be retried.',
++          };
++          this.jobLifecyclePush.notifyJobFailed(job.userId, job.jobId, job.failure);
++        }
++        if (mapped.status === 'ready' || mapped.status === 'failed') {
++          const tier = job.qualityTier ?? DEFAULT_QUALITY_TIER;
++          const costSignal = computeJobCostSignalV1({
++            jobId: job.jobId,
++            qualityTier: tier,
++            terminalStatus: mapped.status,
++            inferenceProviderKey: 'replicate',
++          });
++          job.jobCostSignalV1 = costSignal;
++          const timeToPreviewMs = computeTimeToPreviewMs({
++            queuedAtMs: job.queuedAtMs,
++            readyAtMs: job.readyAtMs,
++            terminalStatus: mapped.status,
++          });
++          emitJobLifecycleMetricsV1Log({
++            schemaVersion: JOB_LIFECYCLE_METRICS_SCHEMA_VERSION,
++            jobId: job.jobId,
++            terminalStatus: mapped.status,
++            qualityTier: tier,
++            timeToPreviewMs,
++          });
++          emitJobCostSignalV1Log(costSignal);
++        }
++        await this.saveStore();
++      }
++    } catch {
++      // Keep previous status for polling retries.
++    }
++    return {
++      data: this.mapJobToStatusPayload({ job, nowMs }),
++      error: null,
++    };
++  }
++
++  async getOutputReportEligibility(params: { userId: string; jobId: string }):
++    Promise<
++      | { ok: true }
++      | {
++        ok: false;
++        code: 'JOB_NOT_FOUND' | 'JOB_NOT_READY';
++        message: string;
++        retryable: false;
++      }
++    > {
++    await this.ensureStoreLoaded();
++    const job = this.store.jobs[params.jobId];
++    if (!job || job.userId !== params.userId) {
++      return {
++        ok: false,
++        code: 'JOB_NOT_FOUND',
++        message: 'Generation job not found.',
++        retryable: false,
++      };
++    }
++
++    if (job.status !== 'ready') {
++      return {
++        ok: false,
++        code: 'JOB_NOT_READY',
++        message: 'Reports are accepted only for ready jobs.',
++        retryable: false,
++      };
++    }
++
++    return { ok: true };
++  }
++
++  async listGenerationJobs(params: {
+     userId: string;
+-  }): GenerationJobHistoryListEnvelope {
++  }): Promise<GenerationJobHistoryListEnvelope> {
++    await this.ensureStoreLoaded();
+     const items = Object.values(this.store.jobs)
+       .filter((job) => job.userId === params.userId)
+       .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
+@@ -437,6 +744,9 @@ export class JobsService {
+         jobId: job.jobId,
+         status: job.status,
+         updatedAt: new Date(job.updatedAtMs).toISOString(),
++        ...(typeof job.sourceImageUrl === 'string'
++          ? { sourceImageUrl: job.sourceImageUrl }
++          : {}),
+       }));
+ 
+     return {
+@@ -446,10 +756,11 @@ export class JobsService {
+     };
+   }
+ 
+-  getGenerationJobHistoryDetail(params: {
++  async getGenerationJobHistoryDetail(params: {
+     userId: string;
+     jobId: string;
+-  }): GenerationJobHistoryDetailEnvelope {
++  }): Promise<GenerationJobHistoryDetailEnvelope> {
++    await this.ensureStoreLoaded();
+     const job = this.store.jobs[params.jobId];
+     if (!job || job.userId !== params.userId) {
+       return this.makeErrorEnvelope({
+@@ -482,10 +793,153 @@ export class JobsService {
+     };
+   }
+ 
+-  getGenerationJobPreview(params: {
++  async getJobSnapshotForModeration(params: { jobId: string }): Promise<{
++    jobId: string;
++    userId: string;
++    status: GenerationJobStatus;
++    updatedAt: string;
++    queuedAt?: string;
++    processingAt?: string;
++    readyAt?: string;
++    failedAt?: string;
++    failure?: {
++      retryable: boolean;
++      reasonCode: string;
++      nextAction: string;
++      message: string;
++    };
++  } | null> {
++    await this.ensureStoreLoaded();
++    const snapshot = this.getInternalJobSnapshot(params);
++    if (!snapshot) return null;
++
++    return {
++      jobId: snapshot.jobId,
++      userId: snapshot.userId,
++      status: snapshot.status,
++      updatedAt: snapshot.updatedAt,
++      ...(snapshot.queuedAt ? { queuedAt: snapshot.queuedAt } : {}),
++      ...(snapshot.processingAt ? { processingAt: snapshot.processingAt } : {}),
++      ...(snapshot.readyAt ? { readyAt: snapshot.readyAt } : {}),
++      ...(snapshot.failedAt ? { failedAt: snapshot.failedAt } : {}),
++      ...(snapshot.failure ? { failure: snapshot.failure } : {}),
++    };
++  }
++
++  async getJobDiagnosticsSnapshot(params: { jobId: string }): Promise<{
++    jobId: string;
++    userId: string;
++    status: GenerationJobStatus;
++    traceId: string;
++    updatedAt: string;
++    queuedAt?: string;
++    processingAt?: string;
++    readyAt?: string;
++    failedAt?: string;
++    failure?: {
++      retryable: boolean;
++      reasonCode: string;
++      nextAction: string;
++    };
++  } | null> {
++    await this.ensureStoreLoaded();
++    const snapshot = this.getInternalJobSnapshot(params);
++    if (!snapshot) return null;
++
++    return {
++      jobId: snapshot.jobId,
++      userId: snapshot.userId,
++      status: snapshot.status,
++      traceId: snapshot.traceId,
++      updatedAt: snapshot.updatedAt,
++      ...(snapshot.queuedAt ? { queuedAt: snapshot.queuedAt } : {}),
++      ...(snapshot.processingAt ? { processingAt: snapshot.processingAt } : {}),
++      ...(snapshot.readyAt ? { readyAt: snapshot.readyAt } : {}),
++      ...(snapshot.failedAt ? { failedAt: snapshot.failedAt } : {}),
++      ...(snapshot.failure
++        ? {
++            failure: {
++              retryable: snapshot.failure.retryable,
++              reasonCode: snapshot.failure.reasonCode,
++              nextAction: snapshot.failure.nextAction,
++            },
++          }
++        : {}),
++    };
++  }
++
++  /**
++   * Internal analytics snapshot used for aggregate reporting.
++   * Includes only fields required by quality-tier comparisons.
++   */
++  async listJobsForQualityTierComparison(): Promise<Array<{
++    jobId: string;
++    status: GenerationJobStatus;
++    qualityTier?: number;
++    queuedAtMs?: number;
++    readyAtMs?: number;
++    failedAtMs?: number;
++    jobCostSignalV1?: JobCostSignalPayloadV1;
++  }>> {
++    await this.ensureStoreLoaded();
++    return Object.values(this.store.jobs).map((job) => ({
++      jobId: job.jobId,
++      status: job.status,
++      ...(typeof job.qualityTier === 'number' ? { qualityTier: job.qualityTier } : {}),
++      ...(typeof job.queuedAtMs === 'number' ? { queuedAtMs: job.queuedAtMs } : {}),
++      ...(typeof job.readyAtMs === 'number' ? { readyAtMs: job.readyAtMs } : {}),
++      ...(typeof job.failedAtMs === 'number' ? { failedAtMs: job.failedAtMs } : {}),
++      ...(job.jobCostSignalV1 ? { jobCostSignalV1: job.jobCostSignalV1 } : {}),
++    }));
++  }
++
++  private getInternalJobSnapshot(params: { jobId: string }): {
++    jobId: string;
++    userId: string;
++    status: GenerationJobStatus;
++    traceId: string;
++    updatedAt: string;
++    queuedAt?: string;
++    processingAt?: string;
++    readyAt?: string;
++    failedAt?: string;
++    failure?: {
++      retryable: boolean;
++      reasonCode: string;
++      nextAction: string;
++      message: string;
++    };
++  } | null {
++    const job = this.store.jobs[params.jobId];
++    if (!job) return null;
++
++    return {
++      jobId: job.jobId,
++      userId: job.userId,
++      status: job.status,
++      traceId: this.readPersistedTraceId(job),
++      updatedAt: new Date(job.updatedAtMs).toISOString(),
++      ...(typeof job.queuedAtMs === 'number'
++        ? { queuedAt: new Date(job.queuedAtMs).toISOString() }
++        : {}),
++      ...(typeof job.processingAtMs === 'number'
++        ? { processingAt: new Date(job.processingAtMs).toISOString() }
++        : {}),
++      ...(typeof job.readyAtMs === 'number'
++        ? { readyAt: new Date(job.readyAtMs).toISOString() }
++        : {}),
++      ...(typeof job.failedAtMs === 'number'
++        ? { failedAt: new Date(job.failedAtMs).toISOString() }
++        : {}),
++      ...(job.failure ? { failure: job.failure } : {}),
++    };
++  }
++
++  async getGenerationJobPreview(params: {
+     userId: string;
+     jobId: string;
+-  }): GenerationJobPreviewEnvelope {
++  }): Promise<GenerationJobPreviewEnvelope> {
++    await this.ensureStoreLoaded();
+     const job = this.store.jobs[params.jobId];
+     if (!job || job.userId !== params.userId) {
+       return this.makeErrorEnvelope({
+@@ -503,6 +957,18 @@ export class JobsService {
+       });
+     }
+     if (this.shouldPreviewFail(job.jobId)) {
++      if (job.providerKey === 'replicate' && job.outputUrl) {
++        return {
++          data: {
++            jobId: job.jobId,
++            status: 'ready',
++            updatedAt: new Date(job.updatedAtMs).toISOString(),
++            previewUri: job.outputUrl,
++            mimeType: 'video/mp4',
++          },
++          error: null,
++        };
++      }
+       return this.makeErrorEnvelope({
+         code: 'PREVIEW_LOAD_FAILED',
+         message: 'Preview failed to load. Please retry.',
+@@ -516,17 +982,32 @@ export class JobsService {
+         jobId: job.jobId,
+         status: 'ready',
+         updatedAt: new Date(job.updatedAtMs).toISOString(),
+-        previewUri: `https://cdn.banyone.local/generated/${job.jobId}.mp4`,
++        previewUri:
++          job.outputUrl ?? `https://cdn.banyone.local/generated/${job.jobId}.mp4`,
+         mimeType: 'video/mp4',
+       },
+       error: null,
+     };
+   }
+ 
+-  createGenerationJobExport(params: {
++  async createGenerationJobExport(params: {
+     userId: string;
+     jobId: string;
+-  }): GenerationJobExportEnvelope {
++  }): Promise<GenerationJobExportEnvelope> {
++    await this.ensureStoreLoaded();
++    const abuseRestriction = await this.abuse.checkRestriction({
++      userId: params.userId,
++      action: 'generation_job_export',
++    });
++    if (abuseRestriction.blocked) {
++      return this.makeErrorEnvelope({
++        code: ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
++        message: 'This account is currently restricted from this action.',
++        retryable: abuseRestriction.details.expiresAt !== undefined,
++        details: abuseRestriction.details,
++      });
++    }
++
+     const job = this.store.jobs[params.jobId];
+     if (!job || job.userId !== params.userId) {
+       return this.makeErrorEnvelope({
+@@ -544,6 +1025,18 @@ export class JobsService {
+       });
+     }
+     if (this.shouldExportFail(job.jobId)) {
++      if (job.providerKey === 'replicate' && job.outputUrl) {
++        return {
++          data: {
++            jobId: job.jobId,
++            status: 'ready',
++            updatedAt: new Date(job.updatedAtMs).toISOString(),
++            exportUri: job.outputUrl,
++            mimeType: 'video/mp4',
++          },
++          error: null,
++        };
++      }
+       return this.makeErrorEnvelope({
+         code: 'EXPORT_PREPARATION_FAILED',
+         message: 'Unable to prepare export file. Please retry.',
+@@ -557,7 +1050,7 @@ export class JobsService {
+         jobId: job.jobId,
+         status: 'ready',
+         updatedAt: new Date(job.updatedAtMs).toISOString(),
+-        exportUri: `file:///tmp/banyone/${job.jobId}.mp4`,
++        exportUri: job.outputUrl ?? `file:///tmp/banyone/${job.jobId}.mp4`,
+         mimeType: 'video/mp4',
+       },
+       error: null,
+@@ -582,11 +1075,14 @@ export class JobsService {
+     jobId: string;
+     userId?: string;
+     status: GenerationJobStatus;
++    traceId?: string;
++    qualityTier?: number;
+     updatedAtMs?: number;
+     queuedAtMs?: number;
+     processingAtMs?: number;
+     readyAtMs?: number;
+     failedAtMs?: number;
++    sourceImageUrl?: string;
+     failure?: {
+       retryable: boolean;
+       reasonCode: string;
+@@ -619,11 +1115,18 @@ export class JobsService {
+       jobId: params.jobId,
+       userId,
+       status: params.status,
++      ...(params.traceId ? { traceId: params.traceId } : {}),
++      ...(params.qualityTier !== undefined
++        ? { qualityTier: normalizeQualityTierInput(params.qualityTier) }
++        : {}),
+       updatedAtMs,
+       queuedAtMs,
+       processingAtMs,
+       readyAtMs,
+       failedAtMs,
++      ...(typeof params.sourceImageUrl === 'string'
++        ? { sourceImageUrl: params.sourceImageUrl }
++        : {}),
+       ...(params.status === 'failed' && params.failure
+         ? { failure: params.failure }
+         : {}),
+@@ -684,7 +1187,10 @@ export class JobsService {
+           delete job.failure;
+         } else {
+           job.failedAtMs = nowMs;
+-          job.failure = this.buildFailureMetadata({ jobId: job.jobId });
++          job.failure = this.buildFailureMetadata({
++            jobId: job.jobId,
++            traceId: this.readPersistedTraceId(job),
++          });
+         }
+ 
+         return { from, to, occurredAtMs: nowMs };
+@@ -702,12 +1208,26 @@ export class JobsService {
+     const { job, nowMs } = params;
+     const updatedAt = new Date(job.updatedAtMs).toISOString();
+ 
++    const tier = job.qualityTier ?? DEFAULT_QUALITY_TIER;
++
+     const payload: GenerationJobStatusPayload = {
+       jobId: job.jobId,
+       status: job.status,
+       updatedAt,
++      qualityTier: tier,
+     };
+ 
++    if (job.status === 'ready') {
++      const ttp = computeTimeToPreviewMs({
++        queuedAtMs: job.queuedAtMs,
++        readyAtMs: job.readyAtMs,
++        terminalStatus: 'ready',
++      });
++      if (typeof ttp === 'number') {
++        payload.timeToPreviewMs = ttp;
++      }
++    }
++
+     if (job.status === 'queued') {
+       const queuedAtMs = job.queuedAtMs ?? job.updatedAtMs;
+       const remainingMs = Math.max(
+@@ -751,6 +1271,8 @@ export class JobsService {
+   }
+ 
+   private shouldJobFail(jobId: string): boolean {
++    // Local testing mode should avoid flaky failure branches so UI flows stay stable.
++    if (this.allowMockJobFlow()) return false;
+     const lastChar = (jobId ?? '').trim().slice(-1).toLowerCase();
+     const digit = /^[0-9a-f]$/.test(lastChar)
+       ? parseInt(lastChar, 16)
+@@ -763,24 +1285,76 @@ export class JobsService {
+   }
+ 
+   private shouldPreviewFail(jobId: string): boolean {
++    if (this.allowMockJobFlow()) return false;
+     return this.readDeterministicHexDigit(jobId) % 5 === 1;
+   }
+ 
+   private shouldExportFail(jobId: string): boolean {
++    if (this.allowMockJobFlow()) return false;
+     return this.readDeterministicHexDigit(jobId) % 5 === 2;
+   }
+ 
++  private mapReplicateStatus(
++    status: string,
++    outputUrl?: string,
++  ): { status: GenerationJobStatus; outputUrl?: string } {
++    if (status === 'succeeded') return { status: 'ready', outputUrl };
++    if (status === 'failed' || status === 'canceled') return { status: 'failed' };
++    if (status === 'starting' || status === 'processing') {
++      return { status: 'processing' };
++    }
++    return { status: 'queued' };
++  }
++
++  private readPersistedTraceId(job: PersistedJobRecord): string {
++    const directTraceId =
++      typeof job.traceId === 'string' && job.traceId.length > 0
++        ? job.traceId
++        : undefined;
++    if (directTraceId) return directTraceId;
++
++    const failureTraceId =
++      typeof job.failure?.traceId === 'string' && job.failure.traceId.length > 0
++        ? job.failure.traceId
++        : undefined;
++    if (failureTraceId) return failureTraceId;
++
++    return `legacy-trace:${job.jobId}`;
++  }
++
++  private async chargeCreditsOnce(
++    job: PersistedJobRecord,
++    nowMs: number,
++  ): Promise<void> {
++    const required = Math.max(0, Math.ceil(job.creditsRequired ?? 0));
++    if (required <= 0 || typeof job.creditsChargedAtMs === 'number') {
++      return;
++    }
++    try {
++      await this.userCredits.debit(job.userId, required);
++      job.creditsChargedAtMs = nowMs;
++    } catch (error) {
++      console.error('telemetry.jobs.credits.debit_failed.v1', {
++        jobId: job.jobId,
++        userId: job.userId,
++        required,
++        message: error instanceof Error ? error.message : 'unknown',
++      });
++    }
++  }
++
+   private readDeterministicHexDigit(value: string): number {
+     const lastChar = (value ?? '').trim().slice(-1).toLowerCase();
+     if (/^[0-9a-f]$/.test(lastChar)) return parseInt(lastChar, 16);
+     return value.length % 16;
+   }
+ 
+-  private buildFailureMetadata(params: { jobId: string }): {
++  private buildFailureMetadata(params: { jobId: string; traceId?: string }): {
+     retryable: boolean;
+     reasonCode: string;
+     nextAction: string;
+     message: string;
++    traceId?: string;
+   } {
+     const lastChar = (params.jobId ?? '').trim().slice(-1).toLowerCase();
+     const digit = /^[0-9a-f]$/.test(lastChar)
+@@ -796,21 +1370,23 @@ export class JobsService {
+           reasonCode: 'PROCESSING_FAILED_RETRYABLE',
+           nextAction: 'retry',
+           message: 'Processing failed. You can retry this job.',
++          ...(params.traceId ? { traceId: params.traceId } : {}),
+         }
+       : {
+           retryable: false,
+           reasonCode: 'PROCESSING_FAILED_NON_RETRYABLE',
+           nextAction: 'contact_support',
+           message: 'Processing failed and cannot be retried.',
++          ...(params.traceId ? { traceId: params.traceId } : {}),
+         };
+   }
+ 
+-  private handleCreateForKey(params: {
++  private async handleCreateForKey(params: {
+     userId: string;
+     key: string;
+     body: CreateGenerationJobRequestBody;
+-  }): GenerationJobEnvelope {
+-    if (!this.disclosure.isAcceptedForUser(params.userId)) {
++  }): Promise<GenerationJobEnvelope> {
++    if (!(await this.disclosure.isAcceptedForUser(params.userId))) {
+       return this.makeErrorEnvelope({
+         code: DISCLOSURE_REQUIRED_ERROR_CODE,
+         message:
+@@ -823,6 +1399,40 @@ export class JobsService {
+       });
+     }
+ 
++    const automatedRestriction = await this.abuse.evaluateAutomatedThreshold({
++      userId: params.userId,
++    });
++    if (automatedRestriction) {
++      return this.makeErrorEnvelope({
++        code: ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
++        message: 'This account is currently restricted from this action.',
++        retryable: automatedRestriction.expiresAt !== undefined,
++        details: {
++          restrictionId: automatedRestriction.restrictionId,
++          subjectType: automatedRestriction.subjectType,
++          subjectId: automatedRestriction.subjectId,
++          reason: automatedRestriction.reason,
++          source: automatedRestriction.source,
++          ...(automatedRestriction.expiresAt
++            ? { expiresAt: automatedRestriction.expiresAt }
++            : {}),
++        },
++      });
++    }
++
++    const abuseRestriction = await this.abuse.checkRestriction({
++      userId: params.userId,
++      action: 'generation_job_create',
++    });
++    if (abuseRestriction.blocked) {
++      return this.makeErrorEnvelope({
++        code: ABUSE_RESTRICTION_ACTIVE_ERROR_CODE,
++        message: 'This account is currently restricted from this action.',
++        retryable: abuseRestriction.details.expiresAt !== undefined,
++        details: abuseRestriction.details,
++      });
++    }
++
+     const existing = this.store.idempotency[params.key];
+     if (existing) {
+       return this.makeSuccessEnvelope({
+@@ -885,22 +1495,187 @@ export class JobsService {
+       });
+     }
+ 
++    const policyResult = this.jobPolicy.evaluate({
++      userId: params.userId,
++      body: params.body,
++    });
++    if (policyResult.decision === 'block') {
++      const envelope = this.makeErrorEnvelope({
++        code: POLICY_VIOLATION_ERROR_CODE,
++        message: policyResult.message,
++        retryable: false,
++        details: { policyCode: policyResult.policyCode },
++      });
++      if (envelope.error !== null) {
++        console.info('telemetry.jobs.policy.rejected.v1', {
++          traceId: envelope.error.traceId,
++          policyCode: policyResult.policyCode,
++          userId: params.userId,
++        });
++      }
++      return envelope;
++    }
++
++    const videoCreditPerSecond = this.userCredits.getVideoCreditPerSecond();
++    const creditsRequired = computeRequiredCredits({
++      videoDurationSec: params.body.video.durationSec,
++      videoCreditPerSecond,
++    });
++    const creditStatus = await this.userCredits.hasEnough(
++      params.userId,
++      creditsRequired,
++    );
++    if (!creditStatus.ok) {
++      return this.makeErrorEnvelope({
++        code: INSUFFICIENT_CREDIT_ERROR_CODE,
++        message: 'Not enough credits to generate this video.',
++        retryable: false,
++        details: {
++          balance: creditStatus.balance,
++          required: creditsRequired,
++          shortfall: Math.max(0, creditsRequired - creditStatus.balance),
++          videoCreditPerSecond,
++        },
++      });
++    }
++
+     const jobId = randomUUID();
+-    const status: GenerationJobStatus = 'queued';
+     const nowMs = Date.now();
++    const traceId = randomUUID();
++    const qualityTier = normalizeQualityTierInput(params.body.qualityTier);
++    let status: GenerationJobStatus = 'queued';
++    let providerPredictionId: string | undefined;
++    let providerStatus: string | undefined;
++    let outputUrl: string | undefined;
++    const allowMockFlow = this.allowMockJobFlow();
++    const usingReplicate = this.replicateProvider.isEnabled();
++    if (!usingReplicate && !allowMockFlow) {
++      return this.makeErrorEnvelope({
++        code: 'PROVIDER_NOT_CONFIGURED',
++        message:
++          'Replicate provider is not configured. Set REPLICATE_API_TOKEN and REPLICATE_MODEL.',
++        retryable: false,
++      });
++    }
++    if (usingReplicate && !allowMockFlow) {
++      if (!this.mediaAssets.isManagedAssetUrl(params.body.video.uri)) {
++        return this.makeErrorEnvelope({
++          code: 'INPUT_INVALID',
++          message:
++            'Video must be uploaded first (POST /v1/generation-jobs/assets); use the returned asset URL.',
++          retryable: false,
++        });
++      }
++      if (!this.mediaAssets.isManagedAssetUrl(params.body.image.uri)) {
++        return this.makeErrorEnvelope({
++          code: 'INPUT_INVALID',
++          message:
++            'Image must be uploaded first (POST /v1/generation-jobs/assets); use the returned asset URL.',
++          retryable: false,
++        });
++      }
++      let videoBuffer: Buffer;
++      let imageBuffer: Buffer;
++      try {
++        videoBuffer = this.mediaAssets.readUploadedAssetBuffer(params.body.video.uri);
++        imageBuffer = this.mediaAssets.readUploadedAssetBuffer(params.body.image.uri);
++      } catch {
++        return this.makeErrorEnvelope({
++          code: 'INPUT_INVALID',
++          message: 'Uploaded media could not be read. Re-upload and try again.',
++          retryable: false,
++        });
++      }
++      try {
++        const prediction = await this.replicateProvider.createPrediction({
++          video: videoBuffer,
++          characterImage: imageBuffer,
++          prompt: params.body.prompt,
++        });
++        providerPredictionId = prediction.predictionId;
++        providerStatus = prediction.status;
++        const mapped = this.mapReplicateStatus(prediction.status);
++        status = mapped.status;
++        outputUrl = mapped.outputUrl;
++      } catch (error) {
++        this.mediaAssets.deleteByUrl(params.body.video.uri ?? undefined);
++        this.mediaAssets.deleteByUrl(params.body.image.uri ?? undefined);
++        return this.makeErrorEnvelope({
++          code: 'PROVIDER_SUBMIT_FAILED',
++          message: 'Unable to submit generation request to provider.',
++          retryable: true,
++          details:
++            error instanceof Error
++              ? { provider: 'replicate', reason: error.message }
++              : { provider: 'replicate' },
++        });
++      }
++    }
+ 
+     this.store.jobs[jobId] = {
+       jobId,
+       userId: params.userId,
+       status,
++      traceId,
++      qualityTier,
+       updatedAtMs: nowMs,
+       queuedAtMs: nowMs,
++      ...(usingReplicate && !allowMockFlow
++        ? { providerKey: 'replicate' as const }
++        : {}),
++      ...(providerPredictionId ? { providerPredictionId } : {}),
++      ...(providerStatus ? { providerStatus } : {}),
++      ...(params.body.video.uri ? { sourceVideoUrl: params.body.video.uri } : {}),
++      ...(params.body.image.uri ? { sourceImageUrl: params.body.image.uri } : {}),
++      ...(outputUrl ? { outputUrl } : {}),
++      ...(creditsRequired > 0 ? { creditsRequired } : {}),
++      ...(status === 'processing' ? { processingAtMs: nowMs } : {}),
++      ...(status === 'ready' ? { readyAtMs: nowMs } : {}),
++      ...(status === 'failed'
++        ? {
++            failedAtMs: nowMs,
++            failure: this.buildFailureMetadata({
++              jobId,
++              traceId,
++            }),
++          }
++        : {}),
+     };
+     this.store.idempotency[params.key] = { jobId, status };
+-    this.saveStore();
++      await this.saveStore();
+ 
+-    this.enqueuePlaceholderProcessing();
++    if (!usingReplicate || allowMockFlow) this.enqueuePlaceholderProcessing();
+     this.jobLifecyclePush.notifyJobQueued(params.userId, jobId);
+     return this.makeSuccessEnvelope({ jobId, status });
+   }
+ }
++
++function isPersistedJobCostSignalV1(
++  input: unknown,
++): input is JobCostSignalPayloadV1 {
++  if (typeof input !== 'object' || input === null) return false;
++  const row = input as Record<string, unknown>;
++  if (row.schemaVersion !== 1) return false;
++  if (typeof row.jobId !== 'string' || row.jobId.length === 0) return false;
++  if (
++    row.terminalStatus !== 'ready' &&
++    row.terminalStatus !== 'failed'
++  ) {
++    return false;
++  }
++  if (typeof row.qualityTier !== 'number') return false;
++  if (typeof row.costModelVersion !== 'string') return false;
++  if (
++    typeof row.inferenceProviderKey !== 'undefined' &&
++    typeof row.inferenceProviderKey !== 'string'
++  ) {
++    return false;
++  }
++  if (typeof row.estimatedCost !== 'object' || row.estimatedCost === null) {
++    return false;
++  }
++  const estimatedCost = row.estimatedCost as Record<string, unknown>;
++  if (typeof estimatedCost.amount !== 'number') return false;
++  if (estimatedCost.currencyCode !== 'USD') return false;
++  return true;
++}
+diff --git a/apps/backend/src/modules/jobs/jobs.types.ts b/apps/backend/src/modules/jobs/jobs.types.ts
+index f53398f..c355d19 100644
+--- a/apps/backend/src/modules/jobs/jobs.types.ts
++++ b/apps/backend/src/modules/jobs/jobs.types.ts
+@@ -37,6 +37,14 @@ export type GenerationJobStatusPayload = {
+    * ISO 8601 UTC timestamp indicating last server update time for this job's lifecycle state.
+    */
+   updatedAt: string;
++  /**
++   * Segmentation dimension for metrics (Story 5.2); persisted on create.
++   */
++  qualityTier?: number;
++  /**
++   * Server-computed time-to-preview when `status === 'ready'` and timestamps allow; omitted otherwise.
++   */
++  timeToPreviewMs?: number;
+   /**
+    * Optional bounded ETA for user-facing timeline copy.
+    * Only provided for non-final states.
+@@ -54,10 +62,20 @@ export type GenerationJobStatusEnvelope =
+   | GenerationJobStatusSuccessEnvelope
+   | GenerationJobErrorEnvelope;
+ 
++export type GenerationJobCreditsPayload = {
++  balance: number;
++  videoCreditPerSecond: number;
++};
++
++export type GenerationJobCreditsEnvelope =
++  | { data: GenerationJobCreditsPayload; error: null }
++  | GenerationJobErrorEnvelope;
++
+ export type GenerationJobHistoryListItem = {
+   jobId: string;
+   status: GenerationJobStatus;
+   updatedAt: string;
++  sourceImageUrl?: string;
+ };
+ 
+ export type GenerationJobHistoryListPayload = {
+diff --git a/apps/backend/src/modules/billing/billing.service.ts b/apps/backend/src/modules/billing/billing.service.ts
+new file mode 100644
+index 0000000..1e0a31c
+--- /dev/null
++++ b/apps/backend/src/modules/billing/billing.service.ts
+@@ -0,0 +1,133 @@
++import { Injectable, Logger } from '@nestjs/common';
++
++import { UserCreditsStore } from '../jobs/user-credits.store';
++import {
++  isGrantableEventType,
++  normalizeWebhookProductId,
++  resolveCreditGrantForProduct,
++  type BanyoneBillingProductId,
++} from './credit-grant-policy';
++import { RevenueCatEventDedupeStore } from './revenuecat-event-dedupe.store';
++
++export type RevenueCatWebhookProcessingOutcome =
++  | {
++      kind: 'processed';
++      userId: string;
++      grantedCredits: number;
++      newBalance: number;
++    }
++  | { kind: 'duplicate'; eventId: string }
++  | { kind: 'ignored'; eventId: string; reason: string };
++
++type ParsedEvent = {
++  eventId: string;
++  eventType: string;
++  appUserId: string | null;
++  productId: BanyoneBillingProductId | null;
++  rawProductId: string | null;
++};
++
++@Injectable()
++export class BillingService {
++  private readonly logger = new Logger(BillingService.name);
++
++  constructor(
++    private readonly userCreditsStore: UserCreditsStore,
++    private readonly dedupeStore: RevenueCatEventDedupeStore,
++  ) {}
++
++  async processWebhookPayload(
++    payload: unknown,
++  ): Promise<RevenueCatWebhookProcessingOutcome> {
++    const parsed = parseWebhookEvent(payload);
++    if (!parsed) {
++      this.logger.warn('Received RevenueCat webhook with unparsable payload.');
++      return { kind: 'ignored', eventId: 'unknown', reason: 'INVALID_PAYLOAD' };
++    }
++
++    if (!isGrantableEventType(parsed.eventType)) {
++      return {
++        kind: 'ignored',
++        eventId: parsed.eventId,
++        reason: `EVENT_TYPE_NOT_GRANTABLE:${parsed.eventType}`,
++      };
++    }
++
++    if (!parsed.productId || !parsed.appUserId) {
++      this.logger.warn(
++        `RevenueCat webhook ${parsed.eventId} missing product/user mapping (productId=${parsed.rawProductId ?? 'null'}).`,
++      );
++      return {
++        kind: 'ignored',
++        eventId: parsed.eventId,
++        reason: 'UNKNOWN_PRODUCT_OR_USER',
++      };
++    }
++
++    const reserved = await this.dedupeStore.tryReserveEvent(parsed.eventId);
++    if (!reserved) {
++      return { kind: 'duplicate', eventId: parsed.eventId };
++    }
++
++    const credits = resolveCreditGrantForProduct(parsed.productId);
++    const { balanceAfter } = await this.userCreditsStore.credit(
++      parsed.appUserId,
++      credits,
++    );
++
++    await this.dedupeStore.recordProcessed({
++      eventId: parsed.eventId,
++      eventType: parsed.eventType.toUpperCase(),
++      productId: parsed.productId,
++      userId: parsed.appUserId,
++      grantedCredits: credits,
++      processedAtMs: Date.now(),
++    });
++
++    return {
++      kind: 'processed',
++      userId: parsed.appUserId,
++      grantedCredits: credits,
++      newBalance: balanceAfter,
++    };
++  }
++}
++
++function parseWebhookEvent(payload: unknown): ParsedEvent | null {
++  if (typeof payload !== 'object' || payload === null) return null;
++  const event = (payload as { event?: unknown }).event;
++  if (typeof event !== 'object' || event === null) return null;
++
++  const e = event as {
++    id?: unknown;
++    type?: unknown;
++    app_user_id?: unknown;
++    original_app_user_id?: unknown;
++    product_id?: unknown;
++  };
++
++  if (typeof e.id !== 'string' || typeof e.type !== 'string') return null;
++
++  const appUserId =
++    typeof e.app_user_id === 'string' && e.app_user_id.trim().length > 0
++      ? e.app_user_id.trim()
++      : typeof e.original_app_user_id === 'string' &&
++          e.original_app_user_id.trim().length > 0
++        ? e.original_app_user_id.trim()
++        : null;
++
++  const rawProductId =
++    typeof e.product_id === 'string' && e.product_id.trim().length > 0
++      ? e.product_id.trim()
++      : null;
++
++  const productId = normalizeWebhookProductId(rawProductId);
++
++  return {
++    eventId: e.id,
++    eventType: e.type,
++    appUserId,
++    productId,
++    rawProductId,
++  };
++}
+diff --git a/apps/backend/src/modules/billing/credit-grant-policy.ts b/apps/backend/src/modules/billing/credit-grant-policy.ts
+new file mode 100644
+index 0000000..a31da54
+--- /dev/null
++++ b/apps/backend/src/modules/billing/credit-grant-policy.ts
+@@ -0,0 +1,76 @@
++export const BANYONE_BILLING_PRODUCT_IDS = [
++  'weekly',
++  'monthly',
++  'yearly',
++] as const;
++
++export type BanyoneBillingProductId =
++  (typeof BANYONE_BILLING_PRODUCT_IDS)[number];
++
++const CREDIT_GRANT_BY_PRODUCT: Record<BanyoneBillingProductId, number> = {
++  weekly: 7000,
++  monthly: 30000,
++  yearly: 365000,
++};
++
++export const BANYONE_PRO_ENTITLEMENT = 'Banyone Pro';
++
++/**
++ * RevenueCat event types that should result in a credit grant. Cancellations,
++ * billing issues, and expirations intentionally do not credit the user.
++ */
++const GRANTABLE_EVENT_TYPES: readonly string[] = [
++  'INITIAL_PURCHASE',
++  'RENEWAL',
++  'NON_RENEWING_PURCHASE',
++  'PRODUCT_CHANGE',
++  'UNCANCELLATION',
++];
++
++export function isBanyoneBillingProductId(
++  value: unknown,
++): value is BanyoneBillingProductId {
++  return (
++    typeof value === 'string' &&
++    (BANYONE_BILLING_PRODUCT_IDS as readonly string[]).includes(value)
++  );
++}
++
++/**
++ * Maps RevenueCat / store product identifiers from webhooks to our canonical ids.
++ * Webhooks often send App Store / Play SKUs (e.g. com.banyone.weekly) while the
++ * app uses short ids (weekly, monthly, yearly).
++ */
++export function normalizeWebhookProductId(
++  raw: string | null | undefined,
++): BanyoneBillingProductId | null {
++  if (typeof raw !== 'string') return null;
++  const t = raw.trim();
++  if (t.length === 0) return null;
++  if (isBanyoneBillingProductId(t)) return t;
++  const lower = t.toLowerCase();
++  if (isBanyoneBillingProductId(lower)) return lower;
++  const segments = lower.split(/[/:]/);
++  const lastSeg = segments[segments.length - 1];
++  if (lastSeg) {
++    const dotParts = lastSeg.split('.');
++    const lastDot = dotParts[dotParts.length - 1];
++    if (isBanyoneBillingProductId(lastDot)) return lastDot;
++  }
++  for (const id of BANYONE_BILLING_PRODUCT_IDS) {
++    if (lower.endsWith(`.${id}`) || lower.endsWith(`:${id}`)) {
++      return id;
++    }
++  }
++  return null;
++}
++
++export function isGrantableEventType(eventType: string): boolean {
++  return GRANTABLE_EVENT_TYPES.includes(eventType.toUpperCase());
++}
++
++export function resolveCreditGrantForProduct(
++  productId: BanyoneBillingProductId,
++): number {
++  return CREDIT_GRANT_BY_PRODUCT[productId];
++}
+diff --git a/apps/backend/src/modules/jobs/user-credits.store.ts b/apps/backend/src/modules/jobs/user-credits.store.ts
+new file mode 100644
+index 0000000..5a636c3
+--- /dev/null
++++ b/apps/backend/src/modules/jobs/user-credits.store.ts
+@@ -0,0 +1,122 @@
++import { Inject, Injectable } from '@nestjs/common';
++import type { Firestore } from 'firebase-admin/firestore';
++
++import { resolveBanyoneCreditConfig } from '../../banyone-credits.config';
++import { FIRESTORE } from '../../infra/firestore.module';
++
++type PersistedUserCredits = {
++  balance: number;
++  updatedAtMs: number;
++};
++
++const USER_CREDITS_COLLECTION = 'user_credits';
++
++@Injectable()
++export class UserCreditsStore {
++  private readonly config = resolveBanyoneCreditConfig();
++
++  constructor(@Inject(FIRESTORE) private readonly firestore: Firestore) {}
++
++  async getBalance(userId: string): Promise<number> {
++    const parsed = await this.getDoc(userId);
++    return parsed?.balance ?? this.config.defaultUserCredits;
++  }
++
++  async hasEnough(
++    userId: string,
++    required: number,
++  ): Promise<{ balance: number; ok: boolean }> {
++    const normalizedRequired = Math.max(0, Math.ceil(required));
++    const balance = await this.getBalance(userId);
++    return { balance, ok: balance >= normalizedRequired };
++  }
++
++  async debit(
++    userId: string,
++    amount: number,
++  ): Promise<{ balanceBefore: number; balanceAfter: number }> {
++    const normalizedAmount = Math.max(0, Math.ceil(amount));
++    if (normalizedAmount === 0) {
++      const balance = await this.getBalance(userId);
++      return { balanceBefore: balance, balanceAfter: balance };
++    }
++
++    return this.firestore.runTransaction(async (tx) => {
++      const docRef = this.firestore
++        .collection(USER_CREDITS_COLLECTION)
++        .doc(userId);
++      const snapshot = await tx.get(docRef);
++      const existing = parsePersistedUserCredits(snapshot.data());
++      const balanceBefore = existing?.balance ?? this.config.defaultUserCredits;
++      if (balanceBefore < normalizedAmount) {
++        throw new Error('INSUFFICIENT_CREDIT_BALANCE');
++      }
++
++      const balanceAfter = balanceBefore - normalizedAmount;
++      tx.set(docRef, { balance: balanceAfter, updatedAtMs: Date.now() });
++      return { balanceBefore, balanceAfter };
++    });
++  }
++
++  async credit(
++    userId: string,
++    amount: number,
++  ): Promise<{ balanceBefore: number; balanceAfter: number }> {
++    const normalizedAmount = Math.max(0, Math.ceil(amount));
++    if (normalizedAmount === 0) {
++      const balance = await this.getBalance(userId);
++      return { balanceBefore: balance, balanceAfter: balance };
++    }
++
++    return this.firestore.runTransaction(async (tx) => {
++      const docRef = this.firestore
++        .collection(USER_CREDITS_COLLECTION)
++        .doc(userId);
++      const snapshot = await tx.get(docRef);
++      const existing = parsePersistedUserCredits(snapshot.data());
++      const balanceBefore = existing?.balance ?? this.config.defaultUserCredits;
++      const balanceAfter = balanceBefore + normalizedAmount;
++      tx.set(docRef, { balance: balanceAfter, updatedAtMs: Date.now() });
++      return { balanceBefore, balanceAfter };
++    });
++  }
++
++  getVideoCreditPerSecond(): number {
++    return this.config.videoCreditPerSecond;
++  }
++
++  private async getDoc(userId: string): Promise<PersistedUserCredits | null> {
++    const snapshot = await this.firestore
++      .collection(USER_CREDITS_COLLECTION)
++      .doc(userId)
++      .get();
++    return parsePersistedUserCredits(snapshot.data());
++  }
++}
++
++function parsePersistedUserCredits(
++  value: unknown,
++): PersistedUserCredits | null {
++  if (typeof value !== 'object' || value === null) return null;
++  const candidate = value as {
++    balance?: unknown;
++    updatedAtMs?: unknown;
++  };
++  if (
++    typeof candidate.balance !== 'number' ||
++    !Number.isFinite(candidate.balance) ||
++    candidate.balance < 0
++  ) {
++    return null;
++  }
++  const updatedAtMs =
++    typeof candidate.updatedAtMs === 'number' &&
++    Number.isFinite(candidate.updatedAtMs) &&
++    candidate.updatedAtMs > 0
++      ? Math.floor(candidate.updatedAtMs)
++      : Date.now();
++  return {
++    balance: Math.floor(candidate.balance),
++    updatedAtMs,
++  };
++}

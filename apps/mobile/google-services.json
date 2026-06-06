@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "339034791583",
+    "project_id": "banyone-bce0f",
+    "storage_bucket": "banyone-bce0f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:339034791583:android:6ef58e1fd77eb90bcf0caa",
+        "android_client_info": {
+          "package_name": "com.banyone"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "339034791583-l4mu3n2us44sft10j8aa4n7slg4q3e8b.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBVzlmnAyEh7mtvcKFtaFYZh5NOxWNzd-Y"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "339034791583-cfprnto5vgrr2d2hnhaag2bs529veh9l.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "339034791583-elbr8acoopvok9dc2393od2gp1ud4nd1.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.banyone"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

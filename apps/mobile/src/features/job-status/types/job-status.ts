@@ -11,6 +11,8 @@ export type JobStatusPayload = {
   jobId: string;
   status: JobStatusStage;
   updatedAt: string;
+  qualityTier?: number;
+  timeToPreviewMs?: number;
   etaSeconds?: number;
   failure?: JobFailureMetadata;
 };

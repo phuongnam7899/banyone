@@ -1,12 +1,15 @@
 import React from 'react';
 import { AppState, Platform } from 'react-native';
 
+import { DEFAULT_QUALITY_TIER } from '@banyone/contracts';
+
 import { useBanyoneAuth } from '@/features/auth/auth-context';
 import { banyoneAuthenticatedFetch } from '@/infra/api-client/authenticated-fetch';
+import { emitFunnelTelemetry, emitJobExperienceMetrics } from '@/infra/telemetry';
 
 import type { JobFailureMetadata, JobStatusPayload } from '../types/job-status';
 
-const POLL_INTERVAL_MS = 500;
+const POLL_INTERVAL_MS = 3_000;
 const ENDPOINT_PATH = '/v1/generation-jobs';
 
 function resolveApiBaseUrl(): string {
@@ -90,9 +93,14 @@ export function useJobStatusPolling(jobId: string | null, initialStatus?: JobSta
 
         if (json.error === null) {
           // Reconcile server truth; never invent statuses locally.
+          const d = json.data;
           setStatus({
-            ...json.data,
-            failure: toParsedFailure(json.data.failure),
+            ...d,
+            failure: toParsedFailure(d.failure),
+            ...(typeof d.qualityTier === 'number' ? { qualityTier: d.qualityTier } : {}),
+            ...(typeof d.timeToPreviewMs === 'number'
+              ? { timeToPreviewMs: d.timeToPreviewMs }
+              : {}),
           });
         } else {
           // Keep timeline stable: treat errors as non-state changes in MVP.
@@ -162,19 +170,33 @@ export function useJobStatusPolling(jobId: string | null, initialStatus?: JobSta
 
   React.useEffect(() => {
     if (!status) return;
+    if (!jobId) return;
 
     const previousStage = lastStageRef.current;
     const currentStage = status.status;
     const serverUpdatedAtMs = Date.parse(status.updatedAt);
     const renderedAtMs = Date.now();
 
-    if (previousStage && previousStage !== currentStage) {
-      console.info('telemetry.jobs.lifecycle.client.transition.v1', {
+    if (previousStage !== currentStage) {
+      emitFunnelTelemetry({
+        funnelStage: 'job_status_transition',
+        eventName: 'job_status_transition',
         jobId,
-        from: previousStage,
-        to: currentStage,
-        transitionUpdatedAt: status.updatedAt,
+        qualityTier: status.qualityTier ?? DEFAULT_QUALITY_TIER,
+        terminalJobStatusClass: currentStage,
+        code: previousStage ? `${previousStage}_to_${currentStage}` : `initial_${currentStage}`,
       });
+
+      if (currentStage === 'ready' || currentStage === 'failed') {
+        emitJobExperienceMetrics({
+          metricKind: 'lifecycle_terminal_observed',
+          jobId,
+          qualityTier: status.qualityTier ?? DEFAULT_QUALITY_TIER,
+          serverTimeToPreviewMs:
+            typeof status.timeToPreviewMs === 'number' ? status.timeToPreviewMs : undefined,
+          terminalJobStatusClass: currentStage,
+        });
+      }
     }
 
     if (Number.isFinite(serverUpdatedAtMs)) {

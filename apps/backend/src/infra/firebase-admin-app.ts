@@ -1,4 +1,5 @@
 import * as admin from 'firebase-admin';
+import type { Firestore } from 'firebase-admin/firestore';
 
 /**
  * Single Firebase Admin app for auth verification and FCM.
@@ -25,4 +26,12 @@ export function getOrInitializeFirebaseAdminApp(): admin.app.App {
   throw new Error(
     'Firebase Admin is not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS.',
   );
+}
+
+let firestoreSingleton: Firestore | null = null;
+
+export function getOrInitializeFirestore(): Firestore {
+  if (firestoreSingleton) return firestoreSingleton;
+  firestoreSingleton = admin.firestore(getOrInitializeFirebaseAdminApp());
+  return firestoreSingleton;
 }

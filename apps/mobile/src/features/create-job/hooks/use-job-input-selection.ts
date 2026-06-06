@@ -1,4 +1,4 @@
-import type { CreateJobDraftSelectionV1, CreateJobDraftTelemetryEvent } from '@banyone/contracts';
+import type { CreateJobDraftSelectionV1 } from '@banyone/contracts';
 import * as ImagePicker from 'expo-image-picker';
 import { getInfoAsync } from 'expo-file-system/legacy';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
@@ -24,10 +24,7 @@ import {
   extensionFromFileNameOrUri,
   mimeTypeFromExtension,
 } from '@/features/create-job/utils/media-mime';
-
-function emitDraftTelemetry(event: CreateJobDraftTelemetryEvent): void {
-  console.info(`telemetry.${event.event}.v1`, event);
-}
+import { emitCreateJobDraftTelemetry } from '@/infra/telemetry';
 
 function labelFromAsset(asset: ImagePicker.ImagePickerAsset): string | null {
   return asset.fileName ?? asset.uri.split('/').pop() ?? null;
@@ -54,8 +51,38 @@ function selectionToDraftShape(state: JobInputSelectionState): CreateJobDraftSel
   return { ...state };
 }
 
+function isEphemeralWebBlobUri(uri: string | null | undefined): boolean {
+  return typeof uri === 'string' && uri.startsWith('blob:');
+}
+
+function stripNonPersistableWebUris(
+  selection: CreateJobDraftSelectionV1,
+): CreateJobDraftSelectionV1 {
+  if (Platform.OS !== 'web') return selection;
+
+  const next = { ...selection };
+  if (isEphemeralWebBlobUri(next.videoUri)) {
+    next.videoUri = null;
+    next.videoLabel = null;
+    next.videoDurationSec = null;
+    next.videoWidthPx = null;
+    next.videoHeightPx = null;
+    next.videoMimeType = null;
+  }
+  if (isEphemeralWebBlobUri(next.imageUri)) {
+    next.imageUri = null;
+    next.imageLabel = null;
+    next.imageWidthPx = null;
+    next.imageHeightPx = null;
+    next.imageMimeType = null;
+  }
+  return next;
+}
+
 async function verifyLocalUrisExist(selection: CreateJobDraftSelectionV1): Promise<boolean> {
-  if (Platform.OS === 'web') return true;
+  if (Platform.OS === 'web') {
+    return ![selection.videoUri, selection.imageUri].some(isEphemeralWebBlobUri);
+  }
   const uris = [selection.videoUri, selection.imageUri].filter(Boolean) as string[];
   for (const uri of uris) {
     if (!uri.startsWith('file://')) continue;
@@ -87,13 +114,17 @@ export function useJobInputSelection() {
 
   const persistDraftNow = useCallback(async () => {
     if (suppressDraftSaveRef.current) return;
+    const persistedSelection = stripNonPersistableWebUris(
+      selectionToDraftShape(stateRef.current),
+    );
     const draft = buildDraftPayload({
-      selection: selectionToDraftShape(stateRef.current),
+      selection: persistedSelection,
       pendingIdempotencyKey: pendingKeyRef.current,
     });
     await saveCreateJobDraft(draft);
-    emitDraftTelemetry({
+    emitCreateJobDraftTelemetry({
       event: 'create_job_draft_saved',
+      funnelStage: 'input_selected',
       hasVideo: Boolean(stateRef.current.videoUri),
       hasImage: Boolean(stateRef.current.imageUri),
       hadPendingIdempotencyKey: Boolean(pendingKeyRef.current),
@@ -124,8 +155,9 @@ export function useJobInputSelection() {
         await clearCreateJobDraft();
         if (!cancelled) {
           setDraftRestoreNotice('corrupted');
-          emitDraftTelemetry({
+          emitCreateJobDraftTelemetry({
             event: 'create_job_draft_discarded',
+            funnelStage: 'input_selected',
             hasVideo: false,
             hasImage: false,
           });
@@ -139,8 +171,9 @@ export function useJobInputSelection() {
       });
       setPendingIdempotencyKey(d.pendingIdempotencyKey ?? null);
       setDraftRestoreNotice('restored');
-      emitDraftTelemetry({
+      emitCreateJobDraftTelemetry({
         event: 'create_job_draft_loaded',
+        funnelStage: 'input_selected',
         hasVideo: Boolean(d.selection.videoUri),
         hasImage: Boolean(d.selection.imageUri),
         hadPendingIdempotencyKey: Boolean(d.pendingIdempotencyKey),

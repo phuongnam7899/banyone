@@ -1,34 +1,22 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import * as path from 'path';
+import { Inject, Injectable } from '@nestjs/common';
+import type { Firestore } from 'firebase-admin/firestore';
 import type { SyntheticMediaDisclosureAcceptance } from '@banyone/contracts';
-
-type PersistedDisclosureStore = {
-  version: 1;
-  acceptanceByUserId: Record<string, SyntheticMediaDisclosureAcceptance>;
-};
+import { FIRESTORE } from '../../infra/firestore.module';
 
 const CURRENT_DISCLOSURE_VERSION = 'v1';
 
+@Injectable()
 export class SyntheticMediaDisclosureStore {
-  private readonly storeDir: string;
-  private readonly storeFilePath: string;
-  private store: PersistedDisclosureStore;
-
-  constructor() {
-    const configuredDir = process.env.BANYONE_DISCLOSURE_DATA_DIR;
-    this.storeDir = configuredDir ?? path.join(process.cwd(), '.banyone-disclosure-data');
-    this.storeFilePath = path.join(this.storeDir, 'synthetic-media-disclosure.json');
-    mkdirSync(this.storeDir, { recursive: true });
-    this.store = this.loadStore();
-  }
+  private readonly cache = new Map<string, SyntheticMediaDisclosureAcceptance>();
+  constructor(@Inject(FIRESTORE) private readonly firestore: Firestore) {}
 
   getCurrentVersion(): string {
     return CURRENT_DISCLOSURE_VERSION;
   }
 
   getAcceptanceForUser(userId: string): SyntheticMediaDisclosureAcceptance | null {
-    const accepted = this.store.acceptanceByUserId[userId];
-    return accepted ?? null;
+    const fromCache = this.cache.get(userId);
+    return fromCache ?? null;
   }
 
   isAcceptedForUser(userId: string): boolean {
@@ -44,49 +32,12 @@ export class SyntheticMediaDisclosureStore {
       acceptedAt: new Date().toISOString(),
       version: params.version.trim(),
     };
-    this.store.acceptanceByUserId[params.userId] = recorded;
-    this.saveStore();
+    this.cache.set(params.userId, recorded);
+    void this.firestore
+      .collection('disclosure_acceptance')
+      .doc(params.userId)
+      .set(recorded);
     return recorded;
-  }
-
-  private loadStore(): PersistedDisclosureStore {
-    if (!existsSync(this.storeFilePath)) {
-      return { version: 1, acceptanceByUserId: {} };
-    }
-    try {
-      const raw = readFileSync(this.storeFilePath, { encoding: 'utf-8' });
-      const parsed = JSON.parse(raw) as unknown;
-      return this.normalizeStore(parsed);
-    } catch {
-      return { version: 1, acceptanceByUserId: {} };
-    }
-  }
-
-  private normalizeStore(value: unknown): PersistedDisclosureStore {
-    if (
-      typeof value !== 'object' ||
-      value === null ||
-      !('acceptanceByUserId' in value)
-    ) {
-      return { version: 1, acceptanceByUserId: {} };
-    }
-    const source = (value as { acceptanceByUserId?: unknown }).acceptanceByUserId;
-    if (typeof source !== 'object' || source === null || Array.isArray(source)) {
-      return { version: 1, acceptanceByUserId: {} };
-    }
-
-    const acceptanceByUserId: Record<string, SyntheticMediaDisclosureAcceptance> = {};
-    for (const [userId, rawAcceptance] of Object.entries(source)) {
-      const parsed = tryParseAcceptance(rawAcceptance);
-      if (parsed) acceptanceByUserId[userId] = parsed;
-    }
-    return { version: 1, acceptanceByUserId };
-  }
-
-  private saveStore(): void {
-    writeFileSync(this.storeFilePath, `${JSON.stringify(this.store, null, 2)}\n`, {
-      encoding: 'utf-8',
-    });
   }
 }
 

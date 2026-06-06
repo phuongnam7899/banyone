@@ -35,9 +35,11 @@ describe('mime inference helpers', () => {
     expect(result.image.status).toBe('valid');
   });
 
-  it('converts picker video duration from milliseconds to seconds', () => {
+  it('normalizes picker duration whether milliseconds or seconds', () => {
     expect(durationSecFromAssetDuration(30_000)).toBe(30);
     expect(durationSecFromAssetDuration(120_400)).toBe(120.4);
+    expect(durationSecFromAssetDuration(30)).toBe(30);
+    expect(durationSecFromAssetDuration(120.4)).toBe(120.4);
     expect(durationSecFromAssetDuration(null)).toBeNull();
   });
 });

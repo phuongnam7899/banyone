@@ -11,6 +11,7 @@ export type HistoryListItem = {
   jobId: string;
   status: HistoryJobStatus;
   updatedAt: string;
+  sourceImageUrl?: string;
 };
 
 export type HistoryListResponse =
