@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: banyone-api
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: .
+    buildCommand: npm install && npm run build --workspace @banyone/contracts && npm run build --workspace backend
+    startCommand: npm run start:prod --workspace backend
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

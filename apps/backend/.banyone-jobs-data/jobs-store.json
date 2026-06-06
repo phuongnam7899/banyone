@@ -1,15 +1,159 @@
 {
-  "version": 1,
+  "version": 3,
   "idempotency": {
-    "idem_mn7boyn6_7m3xswpo2by": {
+    "__legacy_unscoped__\u001fidem_mn7boyn6_7m3xswpo2by": {
       "jobId": "b936bd3c-3d9a-4650-aefb-c28ab54c2725",
       "status": "queued"
+    },
+    "NNZ1GNHuUZfEU4AJgOVoujHwcp93\u001fidem_mo1kenj8_o12i4tes9q": {
+      "jobId": "0ae130f2-ae8d-4e28-9616-208915b63c0f",
+      "status": "queued"
+    },
+    "NNZ1GNHuUZfEU4AJgOVoujHwcp93\u001fidem_mo2ws22t_aczrt21i7cf": {
+      "jobId": "9f49bbf6-4189-4f42-a37e-763b887a32f4",
+      "status": "queued"
+    },
+    "NNZ1GNHuUZfEU4AJgOVoujHwcp93\u001fidem_mo2zvhxw_jzathyztko": {
+      "jobId": "2bb56d7c-6146-4458-83ca-21fd5b31a415",
+      "status": "processing"
+    },
+    "NNZ1GNHuUZfEU4AJgOVoujHwcp93\u001fidem_mo3zwh57_412wfnoes5f": {
+      "jobId": "b48afdd5-0d31-4b8f-8854-c12222cc0d2b",
+      "status": "processing"
     }
   },
   "jobs": {
     "b936bd3c-3d9a-4650-aefb-c28ab54c2725": {
       "jobId": "b936bd3c-3d9a-4650-aefb-c28ab54c2725",
-      "status": "queued"
+      "userId": "__legacy_unscoped__",
+      "status": "queued",
+      "updatedAtMs": 1776349012446,
+      "queuedAtMs": 1776349012446,
+      "qualityTier": 1
+    },
+    "0ae130f2-ae8d-4e28-9616-208915b63c0f": {
+      "jobId": "0ae130f2-ae8d-4e28-9616-208915b63c0f",
+      "userId": "NNZ1GNHuUZfEU4AJgOVoujHwcp93",
+      "status": "failed",
+      "updatedAtMs": 1776349131409,
+      "queuedAtMs": 1776349128365,
+      "processingAtMs": 1776349129404,
+      "failedAtMs": 1776349131409,
+      "failure": {
+        "retryable": true,
+        "reasonCode": "PROCESSING_FAILED_RETRYABLE",
+        "nextAction": "retry",
+        "message": "Processing failed. You can retry this job.",
+        "traceId": "e6ef576e-5531-46fc-ac88-aa55a220865d"
+      },
+      "traceId": "e6ef576e-5531-46fc-ac88-aa55a220865d",
+      "qualityTier": 1,
+      "jobCostSignalV1": {
+        "schemaVersion": 1,
+        "jobId": "0ae130f2-ae8d-4e28-9616-208915b63c0f",
+        "qualityTier": 1,
+        "terminalStatus": "failed",
+        "estimatedCost": {
+          "amount": 0.012,
+          "currencyCode": "USD"
+        },
+        "costModelVersion": "stub-tier-v1"
+      }
+    },
+    "9f49bbf6-4189-4f42-a37e-763b887a32f4": {
+      "jobId": "9f49bbf6-4189-4f42-a37e-763b887a32f4",
+      "userId": "NNZ1GNHuUZfEU4AJgOVoujHwcp93",
+      "status": "failed",
+      "updatedAtMs": 1776430381818,
+      "queuedAtMs": 1776430378772,
+      "processingAtMs": 1776430379814,
+      "failedAtMs": 1776430381818,
+      "failure": {
+        "retryable": false,
+        "reasonCode": "PROCESSING_FAILED_NON_RETRYABLE",
+        "nextAction": "contact_support",
+        "message": "Processing failed and cannot be retried.",
+        "traceId": "4fd134bc-027d-45f3-b2fa-4dc332307fce"
+      },
+      "traceId": "4fd134bc-027d-45f3-b2fa-4dc332307fce",
+      "qualityTier": 1,
+      "jobCostSignalV1": {
+        "schemaVersion": 1,
+        "jobId": "9f49bbf6-4189-4f42-a37e-763b887a32f4",
+        "qualityTier": 1,
+        "terminalStatus": "failed",
+        "estimatedCost": {
+          "amount": 0.012,
+          "currencyCode": "USD"
+        },
+        "costModelVersion": "stub-tier-v1"
+      },
+      "sourceVideoUrl": "blob:http://localhost:8081/173e794a-c091-476e-a80a-d3b3ef4978d4",
+      "sourceImageUrl": "blob:http://localhost:8081/3ade8bca-1a09-492f-89a0-8f1ceff42db1"
+    },
+    "2bb56d7c-6146-4458-83ca-21fd5b31a415": {
+      "jobId": "2bb56d7c-6146-4458-83ca-21fd5b31a415",
+      "userId": "NNZ1GNHuUZfEU4AJgOVoujHwcp93",
+      "status": "failed",
+      "updatedAtMs": 1776437088807,
+      "queuedAtMs": 1776437007425,
+      "processingAtMs": 1776437007425,
+      "failedAtMs": 1776437088807,
+      "failure": {
+        "retryable": false,
+        "reasonCode": "PROCESSING_FAILED_NON_RETRYABLE",
+        "nextAction": "contact_support",
+        "message": "zero-size array to reduction operation minimum which has no identity",
+        "traceId": "b59983e2-7cd0-4d34-b303-5d4c04430109"
+      },
+      "traceId": "b59983e2-7cd0-4d34-b303-5d4c04430109",
+      "qualityTier": 1,
+      "jobCostSignalV1": {
+        "schemaVersion": 1,
+        "jobId": "2bb56d7c-6146-4458-83ca-21fd5b31a415",
+        "qualityTier": 1,
+        "terminalStatus": "failed",
+        "estimatedCost": {
+          "amount": 0.012,
+          "currencyCode": "USD"
+        },
+        "costModelVersion": "stub-tier-v1",
+        "inferenceProviderKey": "replicate"
+      },
+      "providerKey": "replicate",
+      "providerPredictionId": "9swq6rngg1rmr0cxkfjrrgffvw",
+      "providerStatus": "failed",
+      "sourceVideoUrl": "http://localhost:3000/v1/media/video-NNZ1GNHuUZfEU4AJgOVoujHwcp93-973dfda1-1c6c-4b4a-a173-a576c6f3c3eb.mp4",
+      "sourceImageUrl": "http://localhost:3000/v1/media/image-NNZ1GNHuUZfEU4AJgOVoujHwcp93-b2f279df-7b8a-40a9-b944-a093e21308dd.jpg"
+    },
+    "b48afdd5-0d31-4b8f-8854-c12222cc0d2b": {
+      "jobId": "b48afdd5-0d31-4b8f-8854-c12222cc0d2b",
+      "userId": "NNZ1GNHuUZfEU4AJgOVoujHwcp93",
+      "status": "ready",
+      "traceId": "c18a579a-9429-4958-b18c-4ffcc38e7e4a",
+      "qualityTier": 1,
+      "updatedAtMs": 1776496140303,
+      "queuedAtMs": 1776496089900,
+      "providerKey": "replicate",
+      "providerPredictionId": "rw53639ft1rmr0cxkxnsg56z2c",
+      "providerStatus": "succeeded",
+      "sourceVideoUrl": "http://localhost:3000/v1/media/video-NNZ1GNHuUZfEU4AJgOVoujHwcp93-c91ad700-e171-4cd8-b60a-a0ef8e3f5130.mp4",
+      "sourceImageUrl": "http://localhost:3000/v1/media/image-NNZ1GNHuUZfEU4AJgOVoujHwcp93-673d4656-dfa5-45ed-a611-f0b6978a33ae.jpg",
+      "processingAtMs": 1776496089900,
+      "outputUrl": "https://replicate.delivery/xezq/FYOcTqUmv8bmERfcDVnYUeIjgwH8XxG60Kmyi1rkVQPLAOcWA/output.mp4",
+      "readyAtMs": 1776496140303,
+      "jobCostSignalV1": {
+        "schemaVersion": 1,
+        "jobId": "b48afdd5-0d31-4b8f-8854-c12222cc0d2b",
+        "qualityTier": 1,
+        "terminalStatus": "ready",
+        "estimatedCost": {
+          "amount": 0.03,
+          "currencyCode": "USD"
+        },
+        "costModelVersion": "stub-tier-v1",
+        "inferenceProviderKey": "replicate"
+      }
     }
   }
 }

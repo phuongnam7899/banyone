@@ -20,10 +20,15 @@ function getAllowedOrigins(): string[] {
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, new ExpressAdapter());
-  const mediaRoot =
-    process.env.BANYONE_MEDIA_ASSETS_DIR?.trim() ||
-    resolve(process.cwd(), '.banyone-media-assets');
-  app.use('/v1/media', express.static(mediaRoot));
+  const usesFirebaseStorage = Boolean(
+    process.env.FIREBASE_STORAGE_BUCKET?.trim(),
+  );
+  if (!usesFirebaseStorage) {
+    const mediaRoot =
+      process.env.BANYONE_MEDIA_ASSETS_DIR?.trim() ||
+      resolve(process.cwd(), '.banyone-media-assets');
+    app.use('/v1/media', express.static(mediaRoot));
+  }
   app.enableCors({
     origin: (
       origin: string | undefined,

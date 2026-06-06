@@ -2,28 +2,48 @@ import { Injectable } from '@nestjs/common';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { randomUUID } from 'crypto';
 import * as path from 'path';
+import { getDownloadURL, getStorage } from 'firebase-admin/storage';
+
+import { getOrInitializeFirebaseAdminApp } from '../../infra/firebase-admin-app';
 
 const DEFAULT_MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024;
+const STORAGE_OBJECT_PREFIX = 'media';
+
+type PersistUploadResult = {
+  assetUrl: string;
+  mimeType: string | null;
+  sizeBytes: number;
+  storedFilename: string;
+};
 
 @Injectable()
 export class JobMediaAssetsService {
   private readonly rootDir: string;
   private readonly maxUploadSizeBytes: number;
   private readonly publicBaseUrl: string;
+  private readonly storageBucket: string | null;
 
   constructor() {
+    this.storageBucket = process.env.FIREBASE_STORAGE_BUCKET?.trim() || null;
     this.rootDir =
       process.env.BANYONE_MEDIA_ASSETS_DIR?.trim() ||
       path.join(process.cwd(), '.banyone-media-assets');
-    mkdirSync(this.rootDir, { recursive: true });
+    if (!this.storageBucket) {
+      mkdirSync(this.rootDir, { recursive: true });
+    }
     const maxUploadMb = Number(process.env.BANYONE_MEDIA_MAX_UPLOAD_MB ?? '50');
     this.maxUploadSizeBytes =
       Number.isFinite(maxUploadMb) && maxUploadMb > 0
         ? Math.floor(maxUploadMb * 1024 * 1024)
         : DEFAULT_MAX_UPLOAD_SIZE_BYTES;
     this.publicBaseUrl = (
-      process.env.BANYONE_MEDIA_PUBLIC_BASE_URL?.trim() || 'http://localhost:3000'
+      process.env.BANYONE_MEDIA_PUBLIC_BASE_URL?.trim() ||
+      'http://localhost:3000'
     ).replace(/\/$/, '');
+  }
+
+  usesFirebaseStorage(): boolean {
+    return this.storageBucket !== null;
   }
 
   getPublicServeRoot(): string {
@@ -34,20 +54,27 @@ export class JobMediaAssetsService {
     return this.maxUploadSizeBytes;
   }
 
-  persistUpload(params: {
+  async persistUpload(params: {
     userId: string;
     slot: 'video' | 'image';
     originalName?: string;
     buffer: Buffer;
     mimeType?: string;
-  }): {
-    assetUrl: string;
-    mimeType: string | null;
-    sizeBytes: number;
-    storedFilename: string;
-  } {
-    const extension = this.resolveExtension(params.originalName, params.mimeType);
+  }): Promise<PersistUploadResult> {
+    const extension = this.resolveExtension(
+      params.originalName,
+      params.mimeType,
+    );
     const filename = `${params.slot}-${params.userId}-${randomUUID()}${extension}`;
+
+    if (this.storageBucket) {
+      return this.persistUploadToStorage({
+        filename,
+        buffer: params.buffer,
+        mimeType: params.mimeType,
+      });
+    }
+
     const absolutePath = path.join(this.rootDir, filename);
     writeFileSync(absolutePath, params.buffer);
 
@@ -59,18 +86,33 @@ export class JobMediaAssetsService {
     };
   }
 
-  /** True when `uri` is a URL served from this backend's `/v1/media/` store. */
+  /** True when `uri` is a URL served from this backend's managed media store. */
   isManagedAssetUrl(uri: string | null | undefined): uri is string {
     if (typeof uri !== 'string' || !uri.trim()) return false;
-    const prefix = `${this.publicBaseUrl}/v1/media/`;
-    return uri.trim().startsWith(prefix);
+    const trimmed = uri.trim();
+    if (this.storageBucket) {
+      const bucketMarker = `/v0/b/${this.storageBucket}/o/`;
+      if (trimmed.includes(bucketMarker)) return true;
+      const gcsPrefix = `https://storage.googleapis.com/${this.storageBucket}/`;
+      if (trimmed.startsWith(gcsPrefix)) return true;
+    }
+    return trimmed.startsWith(`${this.publicBaseUrl}/v1/media/`);
   }
 
   /**
    * Read bytes for an asset previously returned by {@link persistUpload}.
-   * Used to pass file content to Replicate via the official SDK (same pattern as ai_video_demo).
+   * Used to pass file content to Replicate via the official SDK.
    */
-  readUploadedAssetBuffer(assetUrl: string): Buffer {
+  async readUploadedAssetBuffer(assetUrl: string): Promise<Buffer> {
+    if (this.storageBucket && this.isFirebaseStorageUrl(assetUrl)) {
+      const objectPath = this.parseStorageObjectPath(assetUrl);
+      const [buffer] = await getStorage(getOrInitializeFirebaseAdminApp())
+        .bucket(this.storageBucket)
+        .file(objectPath)
+        .download();
+      return buffer;
+    }
+
     const prefix = `${this.publicBaseUrl}/v1/media/`;
     const trimmed = assetUrl.trim();
     if (!trimmed.startsWith(prefix)) {
@@ -91,8 +133,22 @@ export class JobMediaAssetsService {
     return readFileSync(resolvedFile);
   }
 
-  deleteByUrl(assetUrl: string | undefined): void {
+  async deleteByUrl(assetUrl: string | undefined): Promise<void> {
     if (!assetUrl) return;
+
+    if (this.storageBucket && this.isFirebaseStorageUrl(assetUrl)) {
+      try {
+        const objectPath = this.parseStorageObjectPath(assetUrl);
+        await getStorage(getOrInitializeFirebaseAdminApp())
+          .bucket(this.storageBucket)
+          .file(objectPath)
+          .delete({ ignoreNotFound: true });
+      } catch {
+        // best-effort cleanup
+      }
+      return;
+    }
+
     const prefix = `${this.publicBaseUrl}/v1/media/`;
     if (!assetUrl.startsWith(prefix)) return;
     const filename = assetUrl.slice(prefix.length);
@@ -102,6 +158,68 @@ export class JobMediaAssetsService {
     } catch {
       // best-effort cleanup
     }
+  }
+
+  private async persistUploadToStorage(params: {
+    filename: string;
+    buffer: Buffer;
+    mimeType?: string;
+  }): Promise<PersistUploadResult> {
+    const bucketName = this.storageBucket as string;
+    const objectPath = `${STORAGE_OBJECT_PREFIX}/${params.filename}`;
+    const bucket = getStorage(getOrInitializeFirebaseAdminApp()).bucket(
+      bucketName,
+    );
+    const file = bucket.file(objectPath);
+    await file.save(params.buffer, {
+      resumable: false,
+      metadata: {
+        contentType: params.mimeType ?? 'application/octet-stream',
+      },
+    });
+    const assetUrl = await getDownloadURL(file);
+    return {
+      assetUrl,
+      mimeType: params.mimeType ?? null,
+      sizeBytes: params.buffer.byteLength,
+      storedFilename: params.filename,
+    };
+  }
+
+  private isFirebaseStorageUrl(uri: string): boolean {
+    const trimmed = uri.trim();
+    if (!this.storageBucket) return false;
+    return (
+      trimmed.includes(`/v0/b/${this.storageBucket}/o/`) ||
+      trimmed.startsWith(
+        `https://storage.googleapis.com/${this.storageBucket}/`,
+      )
+    );
+  }
+
+  private parseStorageObjectPath(assetUrl: string): string {
+    const trimmed = assetUrl.trim();
+    const gcsPrefix = `https://storage.googleapis.com/${this.storageBucket}/`;
+    if (trimmed.startsWith(gcsPrefix)) {
+      const objectPath = trimmed.slice(gcsPrefix.length).split('?')[0] ?? '';
+      if (!objectPath || objectPath.includes('..')) {
+        throw new Error('INVALID_ASSET_PATH');
+      }
+      return decodeURIComponent(objectPath);
+    }
+
+    const bucketMarker = `/v0/b/${this.storageBucket}/o/`;
+    const markerIndex = trimmed.indexOf(bucketMarker);
+    if (markerIndex < 0) {
+      throw new Error('ASSET_URL_NOT_MANAGED');
+    }
+    const encodedPath =
+      trimmed.slice(markerIndex + bucketMarker.length).split('?')[0] ?? '';
+    const objectPath = decodeURIComponent(encodedPath);
+    if (!objectPath || objectPath.includes('..')) {
+      throw new Error('INVALID_ASSET_PATH');
+    }
+    return objectPath;
   }
 
   private resolveExtension(
@@ -118,4 +236,3 @@ export class JobMediaAssetsService {
     return '';
   }
 }
-

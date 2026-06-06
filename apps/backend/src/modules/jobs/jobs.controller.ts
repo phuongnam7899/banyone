@@ -82,11 +82,11 @@ export class JobsController {
       storage: memoryStorage(),
     }),
   )
-  uploadGenerationJobAsset(
+  async uploadGenerationJobAsset(
     @CurrentUser() user: BanyoneAuthUser,
     @Body('slot') slot: 'video' | 'image',
     @UploadedFile() fileRaw?: unknown,
-  ): {
+  ): Promise<{
     data: {
       slot: 'video' | 'image';
       assetUrl: string;
@@ -94,7 +94,7 @@ export class JobsController {
       sizeBytes: number;
     };
     error: null;
-  } {
+  }> {
     if (slot !== 'video' && slot !== 'image') {
       throw new BadRequestException('slot must be video or image');
     }
@@ -117,7 +117,7 @@ export class JobsController {
     if (slot === 'image' && !mimeType.startsWith('image/')) {
       throw new BadRequestException('image slot requires an image file');
     }
-    const stored = this.jobMediaAssets.persistUpload({
+    const stored = await this.jobMediaAssets.persistUpload({
       userId: user.uid,
       slot,
       originalName: file.originalname,

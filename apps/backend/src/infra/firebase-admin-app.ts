@@ -9,16 +9,21 @@ export function getOrInitializeFirebaseAdminApp(): admin.app.App {
   const existing = admin.apps[0];
   if (existing) return existing;
 
+  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET?.trim();
+  const appOptions: admin.AppOptions = storageBucket ? { storageBucket } : {};
+
   const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   if (json && json.trim().length > 0) {
     const creds = JSON.parse(json) as admin.ServiceAccount;
     return admin.initializeApp({
+      ...appOptions,
       credential: admin.credential.cert(creds),
     });
   }
 
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     return admin.initializeApp({
+      ...appOptions,
       credential: admin.credential.applicationDefault(),
     });
   }

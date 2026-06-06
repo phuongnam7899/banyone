@@ -1669,8 +1669,12 @@ export class JobsService {
       let videoBuffer: Buffer;
       let imageBuffer: Buffer;
       try {
-        videoBuffer = this.mediaAssets.readUploadedAssetBuffer(params.body.video.uri);
-        imageBuffer = this.mediaAssets.readUploadedAssetBuffer(params.body.image.uri);
+        videoBuffer = await this.mediaAssets.readUploadedAssetBuffer(
+          params.body.video.uri,
+        );
+        imageBuffer = await this.mediaAssets.readUploadedAssetBuffer(
+          params.body.image.uri,
+        );
       } catch {
         return this.makeErrorEnvelope({
           code: 'INPUT_INVALID',
@@ -1690,8 +1694,8 @@ export class JobsService {
         status = mapped.status;
         outputUrl = mapped.outputUrl;
       } catch (error) {
-        this.mediaAssets.deleteByUrl(params.body.video.uri ?? undefined);
-        this.mediaAssets.deleteByUrl(params.body.image.uri ?? undefined);
+        await this.mediaAssets.deleteByUrl(params.body.video.uri ?? undefined);
+        await this.mediaAssets.deleteByUrl(params.body.image.uri ?? undefined);
         return this.makeErrorEnvelope({
           code: 'PROVIDER_SUBMIT_FAILED',
           message: 'Unable to submit generation request to provider.',
