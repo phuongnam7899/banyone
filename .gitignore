@@ -6,6 +6,7 @@ coverage/
 # Secrets — never commit real credentials
 .env
 !.env.example
+.env.render
 *firebase-adminsdk*.json
 
 # Local backend runtime data

@@ -4,13 +4,21 @@
   "version": "1.0.0",
   "scripts": {
     "start": "expo start",
+    "start:dev-client": "expo start --dev-client",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo start --android",
+    "android:dev-client": "expo start --dev-client --android",
+    "emulator": "node ./scripts/run-android-emulator.mjs",
+    "emulator:start": "node ./scripts/run-android-emulator.mjs --skip-install",
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
-    "test": "jest --ci"
+    "test": "jest --ci",
+    "setup:android-dev": "node ./scripts/setup-android-dev.mjs",
+    "build:dev:android": "node ./scripts/build-android-dev.mjs",
+    "credentials:android": "eas credentials -p android",
+    "configure:android-credentials": "node ./scripts/configure-android-credentials.mjs"
   },
   "dependencies": {
     "@banyone/contracts": "file:../../packages/contracts",
@@ -22,6 +30,7 @@
     "expo-auth-session": "~55.0.10",
     "expo-constants": "~55.0.9",
     "expo-crypto": "~55.0.10",
+    "expo-dev-client": "~55.0.10",
     "expo-device": "~55.0.10",
     "expo-file-system": "~55.0.11",
     "expo-font": "~55.0.4",
@@ -57,6 +66,7 @@
     "@types/jest": "^29.5.14",
     "@types/react": "19.2.0",
     "eslint": "^9.0.0",
+    "eas-cli": "^20.1.0",
     "eslint-config-expo": "~55.0.0",
     "jest": "^29.7.0",
     "jest-expo": "^55.0.11",
